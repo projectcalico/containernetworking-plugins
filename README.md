@@ -1,5 +1,7 @@
 Fork of [containernetworking/plugins](https://github.com/containernetworking/plugins) with go version bumps to 1.17.
 
+This branch is based on the v1.0.0 tag.
+
 [![test](https://github.com/containernetworking/plugins/actions/workflows/test.yaml/badge.svg)](https://github.com/containernetworking/plugins/actions/workflows/test.yaml?query=branch%3Amaster)
 
 # Plugins
