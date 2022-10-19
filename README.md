@@ -1,4 +1,4 @@
-Fork of [containernetworking/plugins](https://github.com/containernetworking/plugins) with go version bumps to 1.17.
+Fork of [containernetworking/plugins](https://github.com/containernetworking/plugins) with go version bumps to 1.18.
 
 [![test](https://github.com/containernetworking/plugins/actions/workflows/test.yaml/badge.svg)](https://github.com/containernetworking/plugins/actions/workflows/test.yaml?query=branch%3Amaster)
 
