@@ -13,10 +13,6 @@ var Suite *suite.Suite
 var Failer *failer.Failer
 
 func init() {
-	InitializeGlobals()
-}
-
-func InitializeGlobals() {
 	Failer = failer.New()
 	Suite = suite.New(Failer)
 }
