@@ -28,7 +28,8 @@ import (
 	"github.com/containernetworking/cni/pkg/invoke"
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
-	"github.com/containernetworking/cni/pkg/types/100"
+	types100 "github.com/containernetworking/cni/pkg/types/100"
+	bw "github.com/containernetworking/plugins/pkg/bandwidth"
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/containernetworking/plugins/pkg/testutils"
 
@@ -37,7 +38,7 @@ import (
 	"github.com/onsi/gomega/gexec"
 )
 
-func buildOneConfig(name, cniVersion string, orig *PluginConf, prevResult types.Result) (*PluginConf, []byte, error) {
+func buildOneConfig(name, cniVersion string, orig *bw.PluginConf, prevResult types.Result) (*bw.PluginConf, []byte, error) {
 	var err error
 
 	inject := map[string]interface{}{
@@ -73,7 +74,7 @@ func buildOneConfig(name, cniVersion string, orig *PluginConf, prevResult types.
 		return nil, nil, err
 	}
 
-	conf := &PluginConf{}
+	conf := &bw.PluginConf{}
 	if err := json.Unmarshal(newBytes, &conf); err != nil {
 		return nil, nil, fmt.Errorf("error parsing configuration: %s", err)
 	}
@@ -948,11 +949,11 @@ var _ = Describe("bandwidth test", func() {
 					containerWithTbfResult, err := types100.GetResult(containerWithTbfRes)
 					Expect(err).NotTo(HaveOccurred())
 
-					tbfPluginConf := &PluginConf{}
+					tbfPluginConf := &bw.PluginConf{}
 					err = json.Unmarshal([]byte(ptpConf), &tbfPluginConf)
 					Expect(err).NotTo(HaveOccurred())
 
-					tbfPluginConf.RuntimeConfig.Bandwidth = &BandwidthEntry{
+					tbfPluginConf.RuntimeConfig.Bandwidth = &bw.BandwidthEntry{
 						IngressBurst: burstInBits,
 						IngressRate:  rateInBits,
 						EgressBurst:  burstInBits,
@@ -974,11 +975,11 @@ var _ = Describe("bandwidth test", func() {
 
 					if testutils.SpecVersionHasCHECK(ver) {
 						// Do CNI Check
-						checkConf := &PluginConf{}
+						checkConf := &bw.PluginConf{}
 						err = json.Unmarshal([]byte(ptpConf), &checkConf)
 						Expect(err).NotTo(HaveOccurred())
 
-						checkConf.RuntimeConfig.Bandwidth = &BandwidthEntry{
+						checkConf.RuntimeConfig.Bandwidth = &bw.BandwidthEntry{
 							IngressBurst: burstInBits,
 							IngressRate:  rateInBits,
 							EgressBurst:  burstInBits,
@@ -1056,15 +1057,15 @@ var _ = Describe("bandwidth test", func() {
 
 	Describe("Validating input", func() {
 		It("Should allow only 4GB burst rate", func() {
-			err := validateRateAndBurst(5000, 4*1024*1024*1024*8-16) // 2 bytes less than the max should pass
+			err := bw.ValidateRateAndBurst(5000, 4*1024*1024*1024*8-16) // 2 bytes less than the max should pass
 			Expect(err).NotTo(HaveOccurred())
-			err = validateRateAndBurst(5000, 4*1024*1024*1024*8) // we're 1 bit above MaxUint32
+			err = bw.ValidateRateAndBurst(5000, 4*1024*1024*1024*8) // we're 1 bit above MaxUint32
 			Expect(err).To(HaveOccurred())
-			err = validateRateAndBurst(0, 1)
+			err = bw.ValidateRateAndBurst(0, 1)
 			Expect(err).To(HaveOccurred())
-			err = validateRateAndBurst(1, 0)
+			err = bw.ValidateRateAndBurst(1, 0)
 			Expect(err).To(HaveOccurred())
-			err = validateRateAndBurst(0, 0)
+			err = bw.ValidateRateAndBurst(0, 0)
 			Expect(err).NotTo(HaveOccurred())
 		})
 	})
