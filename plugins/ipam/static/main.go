@@ -68,7 +68,13 @@ type Address struct {
 }
 
 func main() {
-	skel.PluginMain(cmdAdd, cmdCheck, cmdDel, version.All, bv.BuildString("static"))
+	skel.PluginMainFuncs(skel.CNIFuncs{
+		Add:   cmdAdd,
+		Check: cmdCheck,
+		Del:   cmdDel,
+		/* FIXME GC */
+		/* FIXME Status */
+	}, version.All, bv.BuildString("static"))
 }
 
 func loadNetConf(bytes []byte) (*types.NetConf, string, error) {
@@ -276,7 +282,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 	return types.PrintResult(result, confVersion)
 }
 
-func cmdDel(args *skel.CmdArgs) error {
+func cmdDel(_ *skel.CmdArgs) error {
 	// Nothing required because of no resource allocation in static plugin.
 	return nil
 }

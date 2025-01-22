@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"os"
 	"os/exec"
@@ -26,24 +25,18 @@ import (
 	"sync"
 	"time"
 
-	"github.com/containernetworking/cni/pkg/skel"
-	"github.com/containernetworking/cni/pkg/types/100"
-	"github.com/containernetworking/plugins/pkg/ns"
-	"github.com/containernetworking/plugins/pkg/testutils"
-
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 	"github.com/vishvananda/netlink"
 
-	"github.com/d2g/dhcp4"
-	"github.com/d2g/dhcp4server"
-	"github.com/d2g/dhcp4server/leasepool"
-	"github.com/d2g/dhcp4server/leasepool/memorypool"
-
-	. "github.com/onsi/ginkgo"
-	. "github.com/onsi/gomega"
+	"github.com/containernetworking/cni/pkg/skel"
+	types100 "github.com/containernetworking/cni/pkg/types/100"
+	"github.com/containernetworking/plugins/pkg/ns"
+	"github.com/containernetworking/plugins/pkg/testutils"
 )
 
 func getTmpDir() (string, error) {
-	tmpDir, err := ioutil.TempDir(cniDirPrefix, "dhcp")
+	tmpDir, err := os.MkdirTemp(cniDirPrefix, "dhcp")
 	if err == nil {
 		tmpDir = filepath.ToSlash(tmpDir)
 	}
@@ -51,31 +44,52 @@ func getTmpDir() (string, error) {
 	return tmpDir, err
 }
 
-func dhcpServerStart(netns ns.NetNS, leaseIP, serverIP net.IP, numLeases int, stopCh <-chan bool) (*sync.WaitGroup, error) {
-	// Add the expected IP to the pool
-	lp := memorypool.MemoryPool{}
+type DhcpServer struct {
+	cmd  *exec.Cmd
+	lock sync.Mutex
 
-	Expect(numLeases).To(BeNumerically(">", 0))
-	// Currently tests only need at most 2
-	Expect(numLeases).To(BeNumerically("<=", 2))
+	startAddr net.IP
+	endAddr   net.IP
+	leaseTime time.Duration
+}
 
-	// tests expect first lease to be at address 192.168.1.5
-	for i := 5; i < numLeases+5; i++ {
-		err := lp.AddLease(leasepool.Lease{IP: dhcp4.IPAdd(net.IPv4(192, 168, 1, byte(i)), 0)})
-		if err != nil {
-			return nil, fmt.Errorf("error adding IP to DHCP pool: %v", err)
-		}
+func (s *DhcpServer) Serve() error {
+	if err := s.Start(); err != nil {
+		return err
 	}
+	return s.cmd.Wait()
+}
 
-	dhcpServer, err := dhcp4server.New(
-		net.IPv4(192, 168, 1, 1),
-		&lp,
-		dhcp4server.SetLocalAddr(net.UDPAddr{IP: net.IPv4(0, 0, 0, 0), Port: 67}),
-		dhcp4server.SetRemoteAddr(net.UDPAddr{IP: net.IPv4bcast, Port: 68}),
-		dhcp4server.LeaseDuration(time.Minute*15),
+func (s *DhcpServer) Start() error {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+
+	s.cmd = exec.Command(
+		"dnsmasq",
+		"--no-daemon",
+		"--dhcp-sequential-ip", // allocate IPs sequentially
+		"--port=0",             // disable DNS
+		"--conf-file=-",        // Do not read /etc/dnsmasq.conf
+		fmt.Sprintf("--dhcp-range=%s,%s,%d", s.startAddr, s.endAddr, int(s.leaseTime.Seconds())),
 	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create DHCP server: %v", err)
+	s.cmd.Stdin = bytes.NewBufferString("")
+	s.cmd.Stdout = os.Stdout
+	s.cmd.Stderr = os.Stderr
+
+	return s.cmd.Start()
+}
+
+func (s *DhcpServer) Stop() error {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	return s.cmd.Process.Kill()
+}
+
+func dhcpServerStart(netns ns.NetNS, numLeases int, stopCh <-chan bool) *sync.WaitGroup {
+	dhcpServer := &DhcpServer{
+		startAddr: net.IPv4(192, 168, 1, 5),
+		endAddr:   net.IPv4(192, 168, 1, 5+uint8(numLeases)-1),
+		leaseTime: 5 * time.Minute,
 	}
 
 	stopWg := sync.WaitGroup{}
@@ -87,9 +101,10 @@ func dhcpServerStart(netns ns.NetNS, leaseIP, serverIP net.IP, numLeases int, st
 	go func() {
 		defer GinkgoRecover()
 
-		err = netns.Do(func(ns.NetNS) error {
+		err := netns.Do(func(ns.NetNS) error {
 			startWg.Done()
-			if err := dhcpServer.ListenAndServe(); err != nil {
+
+			if err := dhcpServer.Serve(); err != nil {
 				// Log, but don't trap errors; the server will
 				// always report an error when stopped
 				GinkgoT().Logf("DHCP server finished with error: %v", err)
@@ -106,12 +121,12 @@ func dhcpServerStart(netns ns.NetNS, leaseIP, serverIP net.IP, numLeases int, st
 	go func() {
 		startWg.Done()
 		<-stopCh
-		dhcpServer.Shutdown()
+		dhcpServer.Stop()
 		stopWg.Done()
 	}()
 	startWg.Wait()
 
-	return &stopWg, nil
+	return &stopWg
 }
 
 const (
@@ -121,7 +136,7 @@ const (
 )
 
 var _ = BeforeSuite(func() {
-	err := os.MkdirAll(cniDirPrefix, 0700)
+	err := os.MkdirAll(cniDirPrefix, 0o700)
 	Expect(err).NotTo(HaveOccurred())
 })
 
@@ -158,11 +173,11 @@ var _ = Describe("DHCP Operations", func() {
 		err = originalNS.Do(func(ns.NetNS) error {
 			defer GinkgoRecover()
 
+			linkAttrs := netlink.NewLinkAttrs()
+			linkAttrs.Name = hostVethName
 			err = netlink.LinkAdd(&netlink.Veth{
-				LinkAttrs: netlink.LinkAttrs{
-					Name: hostVethName,
-				},
-				PeerName: contVethName,
+				LinkAttrs: linkAttrs,
+				PeerName:  contVethName,
 			})
 			Expect(err).NotTo(HaveOccurred())
 
@@ -203,8 +218,7 @@ var _ = Describe("DHCP Operations", func() {
 		})
 
 		// Start the DHCP server
-		dhcpServerDone, err = dhcpServerStart(originalNS, net.IPv4(192, 168, 1, 5), serverIP.IP, 1, dhcpServerStopCh)
-		Expect(err).NotTo(HaveOccurred())
+		dhcpServerDone = dhcpServerStart(originalNS, 1, dhcpServerStopCh)
 
 		// Start the DHCP client daemon
 		dhcpPluginPath, err := exec.LookPath("dhcp")
@@ -274,7 +288,7 @@ var _ = Describe("DHCP Operations", func() {
 
 				addResult, err = types100.GetResult(r)
 				Expect(err).NotTo(HaveOccurred())
-				Expect(len(addResult.IPs)).To(Equal(1))
+				Expect(addResult.IPs).To(HaveLen(1))
 				Expect(addResult.IPs[0].Address.String()).To(Equal("192.168.1.5/24"))
 				return nil
 			})
@@ -317,7 +331,7 @@ var _ = Describe("DHCP Operations", func() {
 
 				addResult, err = types100.GetResult(r)
 				Expect(err).NotTo(HaveOccurred())
-				Expect(len(addResult.IPs)).To(Equal(1))
+				Expect(addResult.IPs).To(HaveLen(1))
 				Expect(addResult.IPs[0].Address.String()).To(Equal("192.168.1.5/24"))
 				return nil
 			})
@@ -335,9 +349,17 @@ var _ = Describe("DHCP Operations", func() {
 					started.Done()
 					started.Wait()
 
-					err = originalNS.Do(func(ns.NetNS) error {
+					err := originalNS.Do(func(ns.NetNS) error {
 						return testutils.CmdDelWithArgs(args, func() error {
-							return cmdDel(args)
+							copiedArgs := &skel.CmdArgs{
+								ContainerID: args.ContainerID,
+								Netns:       args.Netns,
+								IfName:      args.IfName,
+								StdinData:   args.StdinData,
+								Path:        args.Path,
+								Args:        args.Args,
+							}
+							return cmdDel(copiedArgs)
 						})
 					})
 					Expect(err).NotTo(HaveOccurred())
@@ -364,7 +386,7 @@ const (
 	contVethName1  string = "eth1"
 )
 
-func dhcpSetupOriginalNS() (chan bool, net.IPNet, string, ns.NetNS, ns.NetNS, error) {
+func dhcpSetupOriginalNS() (chan bool, string, ns.NetNS, ns.NetNS, error) {
 	var originalNS, targetNS ns.NetNS
 	var dhcpServerStopCh chan bool
 	var socketPath string
@@ -385,20 +407,15 @@ func dhcpSetupOriginalNS() (chan bool, net.IPNet, string, ns.NetNS, ns.NetNS, er
 	targetNS, err = testutils.NewNS()
 	Expect(err).NotTo(HaveOccurred())
 
-	serverIP := net.IPNet{
-		IP:   net.IPv4(192, 168, 1, 1),
-		Mask: net.IPv4Mask(255, 255, 255, 0),
-	}
-
 	// Use (original) NS
 	err = originalNS.Do(func(ns.NetNS) error {
 		defer GinkgoRecover()
 
+		linkAttrs := netlink.NewLinkAttrs()
+		linkAttrs.Name = hostBridgeName
 		// Create bridge in the "host" (original) NS
 		br = &netlink.Bridge{
-			LinkAttrs: netlink.LinkAttrs{
-				Name: hostBridgeName,
-			},
+			LinkAttrs: linkAttrs,
 		}
 
 		err = netlink.LinkAdd(br)
@@ -484,7 +501,7 @@ func dhcpSetupOriginalNS() (chan bool, net.IPNet, string, ns.NetNS, ns.NetNS, er
 		return nil
 	})
 
-	return dhcpServerStopCh, serverIP, socketPath, originalNS, targetNS, err
+	return dhcpServerStopCh, socketPath, originalNS, targetNS, err
 }
 
 var _ = Describe("DHCP Lease Unavailable Operations", func() {
@@ -494,11 +511,10 @@ var _ = Describe("DHCP Lease Unavailable Operations", func() {
 	var clientCmd *exec.Cmd
 	var socketPath string
 	var tmpDir string
-	var serverIP net.IPNet
 	var err error
 
 	BeforeEach(func() {
-		dhcpServerStopCh, serverIP, socketPath, originalNS, targetNS, err = dhcpSetupOriginalNS()
+		dhcpServerStopCh, socketPath, originalNS, targetNS, err = dhcpSetupOriginalNS()
 		Expect(err).NotTo(HaveOccurred())
 
 		// Move the container side to the container's NS
@@ -518,8 +534,7 @@ var _ = Describe("DHCP Lease Unavailable Operations", func() {
 		})
 
 		// Start the DHCP server
-		dhcpServerDone, err = dhcpServerStart(originalNS, net.IPv4(192, 168, 1, 5), serverIP.IP, 1, dhcpServerStopCh)
-		Expect(err).NotTo(HaveOccurred())
+		dhcpServerDone = dhcpServerStart(originalNS, 1, dhcpServerStopCh)
 
 		// Start the DHCP client daemon
 		dhcpPluginPath, err := exec.LookPath("dhcp")
@@ -529,7 +544,7 @@ var _ = Describe("DHCP Lease Unavailable Operations", func() {
 		// `go test` timeout with default delays. Since our DHCP server
 		// and client daemon are local processes anyway, we can depend on
 		// them to respond very quickly.
-		clientCmd = exec.Command(dhcpPluginPath, "daemon", "-socketpath", socketPath, "-timeout", "2s", "-resendmax", "8s")
+		clientCmd = exec.Command(dhcpPluginPath, "daemon", "-socketpath", socketPath, "-timeout", "2s", "-resendmax", "8s", "--resendtimeout", "10s")
 
 		// copy dhcp client's stdout/stderr to test stdout
 		var b bytes.Buffer
@@ -597,7 +612,7 @@ var _ = Describe("DHCP Lease Unavailable Operations", func() {
 
 				addResult, err = types100.GetResult(r)
 				Expect(err).NotTo(HaveOccurred())
-				Expect(len(addResult.IPs)).To(Equal(1))
+				Expect(addResult.IPs).To(HaveLen(1))
 				Expect(addResult.IPs[0].Address.String()).To(Equal("192.168.1.5/24"))
 				return nil
 			})

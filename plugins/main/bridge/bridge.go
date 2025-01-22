@@ -18,14 +18,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"os"
 	"runtime"
+	"sort"
 	"syscall"
 	"time"
 
-	"github.com/j-keck/arping"
 	"github.com/vishvananda/netlink"
 
 	"github.com/containernetworking/cni/pkg/skel"
@@ -36,7 +35,6 @@ import (
 	"github.com/containernetworking/plugins/pkg/ipam"
 	"github.com/containernetworking/plugins/pkg/link"
 	"github.com/containernetworking/plugins/pkg/ns"
-	"github.com/containernetworking/plugins/pkg/utils"
 	bv "github.com/containernetworking/plugins/pkg/utils/buildversion"
 	"github.com/containernetworking/plugins/pkg/utils/sysctl"
 )
@@ -48,16 +46,21 @@ const defaultBrName = "cni0"
 
 type NetConf struct {
 	types.NetConf
-	BrName       string `json:"bridge"`
-	IsGW         bool   `json:"isGateway"`
-	IsDefaultGW  bool   `json:"isDefaultGateway"`
-	ForceAddress bool   `json:"forceAddress"`
-	IPMasq       bool   `json:"ipMasq"`
-	MTU          int    `json:"mtu"`
-	HairpinMode  bool   `json:"hairpinMode"`
-	PromiscMode  bool   `json:"promiscMode"`
-	Vlan         int    `json:"vlan"`
-	MacSpoofChk  bool   `json:"macspoofchk,omitempty"`
+	BrName                    string       `json:"bridge"`
+	IsGW                      bool         `json:"isGateway"`
+	IsDefaultGW               bool         `json:"isDefaultGateway"`
+	ForceAddress              bool         `json:"forceAddress"`
+	IPMasq                    bool         `json:"ipMasq"`
+	IPMasqBackend             *string      `json:"ipMasqBackend,omitempty"`
+	MTU                       int          `json:"mtu"`
+	HairpinMode               bool         `json:"hairpinMode"`
+	PromiscMode               bool         `json:"promiscMode"`
+	Vlan                      int          `json:"vlan"`
+	VlanTrunk                 []*VlanTrunk `json:"vlanTrunk,omitempty"`
+	PreserveDefaultVlan       bool         `json:"preserveDefaultVlan"`
+	MacSpoofChk               bool         `json:"macspoofchk,omitempty"`
+	EnableDad                 bool         `json:"enabledad,omitempty"`
+	DisableContainerInterface bool         `json:"disableContainerInterface,omitempty"`
 
 	Args struct {
 		Cni BridgeArgs `json:"cni,omitempty"`
@@ -66,7 +69,14 @@ type NetConf struct {
 		Mac string `json:"mac,omitempty"`
 	} `json:"runtimeConfig,omitempty"`
 
-	mac string
+	mac   string
+	vlans []int
+}
+
+type VlanTrunk struct {
+	MinID *int `json:"minID,omitempty"`
+	MaxID *int `json:"maxID,omitempty"`
+	ID    *int `json:"id,omitempty"`
 }
 
 type BridgeArgs struct {
@@ -95,12 +105,25 @@ func init() {
 func loadNetConf(bytes []byte, envArgs string) (*NetConf, string, error) {
 	n := &NetConf{
 		BrName: defaultBrName,
+		// Set default value equal to true to maintain existing behavior.
+		PreserveDefaultVlan: true,
 	}
 	if err := json.Unmarshal(bytes, n); err != nil {
 		return nil, "", fmt.Errorf("failed to load netconf: %v", err)
 	}
 	if n.Vlan < 0 || n.Vlan > 4094 {
 		return nil, "", fmt.Errorf("invalid VLAN ID %d (must be between 0 and 4094)", n.Vlan)
+	}
+	var err error
+	n.vlans, err = collectVlanTrunk(n.VlanTrunk)
+	if err != nil {
+		// fail to parsing
+		return nil, "", err
+	}
+
+	// Currently bridge CNI only support access port(untagged only) or trunk port(tagged only)
+	if n.Vlan > 0 && n.vlans != nil {
+		return nil, "", errors.New("cannot set vlan and vlanTrunk at the same time")
 	}
 
 	if envArgs != "" {
@@ -125,12 +148,66 @@ func loadNetConf(bytes []byte, envArgs string) (*NetConf, string, error) {
 	return n, n.CNIVersion, nil
 }
 
+// This method is copied from https://github.com/k8snetworkplumbingwg/ovs-cni/blob/v0.27.2/pkg/plugin/plugin.go
+func collectVlanTrunk(vlanTrunk []*VlanTrunk) ([]int, error) {
+	if vlanTrunk == nil {
+		return nil, nil
+	}
+
+	vlanMap := make(map[int]struct{})
+	for _, item := range vlanTrunk {
+		var minID int
+		var maxID int
+		var ID int
+
+		switch {
+		case item.MinID != nil && item.MaxID != nil:
+			minID = *item.MinID
+			if minID <= 0 || minID > 4094 {
+				return nil, errors.New("incorrect trunk minID parameter")
+			}
+			maxID = *item.MaxID
+			if maxID <= 0 || maxID > 4094 {
+				return nil, errors.New("incorrect trunk maxID parameter")
+			}
+			if maxID < minID {
+				return nil, errors.New("minID is greater than maxID in trunk parameter")
+			}
+			for v := minID; v <= maxID; v++ {
+				vlanMap[v] = struct{}{}
+			}
+		case item.MinID == nil && item.MaxID != nil:
+			return nil, errors.New("minID and maxID should be configured simultaneously, minID is missing")
+		case item.MinID != nil && item.MaxID == nil:
+			return nil, errors.New("minID and maxID should be configured simultaneously, maxID is missing")
+		}
+
+		// single vid
+		if item.ID != nil {
+			ID = *item.ID
+			if ID <= 0 || ID > 4094 {
+				return nil, errors.New("incorrect trunk id parameter")
+			}
+			vlanMap[ID] = struct{}{}
+		}
+	}
+
+	if len(vlanMap) == 0 {
+		return nil, nil
+	}
+	vlans := make([]int, 0, len(vlanMap))
+	for k := range vlanMap {
+		vlans = append(vlans, k)
+	}
+	sort.Slice(vlans, func(i int, j int) bool { return vlans[i] < vlans[j] })
+	return vlans, nil
+}
+
 // calcGateways processes the results from the IPAM plugin and does the
 // following for each IP family:
 //   - Calculates and compiles a list of gateway addresses
 //   - Adds a default route if needed
 func calcGateways(result *current.Result, n *NetConf) (*gwInfo, *gwInfo, error) {
-
 	gwsV4 := &gwInfo{}
 	gwsV6 := &gwInfo{}
 
@@ -258,16 +335,11 @@ func bridgeByName(name string) (*netlink.Bridge, error) {
 }
 
 func ensureBridge(brName string, mtu int, promiscMode, vlanFiltering bool) (*netlink.Bridge, error) {
+	linkAttrs := netlink.NewLinkAttrs()
+	linkAttrs.Name = brName
+	linkAttrs.MTU = mtu
 	br := &netlink.Bridge{
-		LinkAttrs: netlink.LinkAttrs{
-			Name: brName,
-			MTU:  mtu,
-			// Let kernel use default txqueuelen; leaving it unset
-			// means 0, and a zero-length TX queue messes up FIFO
-			// traffic shapers which use TX queue length as the
-			// default packet limit
-			TxQLen: -1,
-		},
+		LinkAttrs: linkAttrs,
 	}
 	if vlanFiltering {
 		br.VlanFiltering = &vlanFiltering
@@ -301,8 +373,8 @@ func ensureBridge(brName string, mtu int, promiscMode, vlanFiltering bool) (*net
 	return br, nil
 }
 
-func ensureVlanInterface(br *netlink.Bridge, vlanId int) (netlink.Link, error) {
-	name := fmt.Sprintf("%s.%d", br.Name, vlanId)
+func ensureVlanInterface(br *netlink.Bridge, vlanID int, preserveDefaultVlan bool) (netlink.Link, error) {
+	name := fmt.Sprintf("%s.%d", br.Name, vlanID)
 
 	brGatewayVeth, err := netlink.LinkByName(name)
 	if err != nil {
@@ -315,7 +387,7 @@ func ensureVlanInterface(br *netlink.Bridge, vlanId int) (netlink.Link, error) {
 			return nil, fmt.Errorf("faild to find host namespace: %v", err)
 		}
 
-		_, brGatewayIface, err := setupVeth(hostNS, br, name, br.MTU, false, vlanId, "")
+		_, brGatewayIface, err := setupVeth(hostNS, br, name, br.MTU, false, vlanID, nil, preserveDefaultVlan, "")
 		if err != nil {
 			return nil, fmt.Errorf("faild to create vlan gateway %q: %v", name, err)
 		}
@@ -324,12 +396,17 @@ func ensureVlanInterface(br *netlink.Bridge, vlanId int) (netlink.Link, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to lookup %q: %v", brGatewayIface.Name, err)
 		}
+
+		err = netlink.LinkSetUp(brGatewayVeth)
+		if err != nil {
+			return nil, fmt.Errorf("failed to up %q: %v", brGatewayIface.Name, err)
+		}
 	}
 
 	return brGatewayVeth, nil
 }
 
-func setupVeth(netns ns.NetNS, br *netlink.Bridge, ifName string, mtu int, hairpinMode bool, vlanID int, mac string) (*current.Interface, *current.Interface, error) {
+func setupVeth(netns ns.NetNS, br *netlink.Bridge, ifName string, mtu int, hairpinMode bool, vlanID int, vlans []int, preserveDefaultVlan bool, mac string) (*current.Interface, *current.Interface, error) {
 	contIface := &current.Interface{}
 	hostIface := &current.Interface{}
 
@@ -366,6 +443,14 @@ func setupVeth(netns ns.NetNS, br *netlink.Bridge, ifName string, mtu int, hairp
 		return nil, nil, fmt.Errorf("failed to setup hairpin mode for %v: %v", hostVeth.Attrs().Name, err)
 	}
 
+	if (vlanID != 0 || len(vlans) > 0) && !preserveDefaultVlan {
+		err = removeDefaultVlan(hostVeth)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to remove default vlan on interface %q: %v", hostIface.Name, err)
+		}
+	}
+
+	// Currently bridge CNI only support access port(untagged only) or trunk port(tagged only)
 	if vlanID != 0 {
 		err = netlink.BridgeVlanAdd(hostVeth, uint16(vlanID), true, true, false, true)
 		if err != nil {
@@ -373,7 +458,33 @@ func setupVeth(netns ns.NetNS, br *netlink.Bridge, ifName string, mtu int, hairp
 		}
 	}
 
+	for _, v := range vlans {
+		err = netlink.BridgeVlanAdd(hostVeth, uint16(v), false, false, false, true)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to setup vlan tag on interface %q: %w", hostIface.Name, err)
+		}
+	}
+
 	return hostIface, contIface, nil
+}
+
+func removeDefaultVlan(hostVeth netlink.Link) error {
+	vlanInfo, err := netlink.BridgeVlanList()
+	if err != nil {
+		return err
+	}
+
+	brVlanInfo, ok := vlanInfo[int32(hostVeth.Attrs().Index)]
+	if ok {
+		for _, info := range brVlanInfo {
+			err = netlink.BridgeVlanDel(hostVeth, info.Vid, false, false, false, true)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
 }
 
 func calcGatewayIP(ipn *net.IPNet) net.IP {
@@ -383,7 +494,7 @@ func calcGatewayIP(ipn *net.IPNet) net.IP {
 
 func setupBridge(n *NetConf) (*netlink.Bridge, *current.Interface, error) {
 	vlanFiltering := false
-	if n.Vlan != 0 {
+	if n.Vlan != 0 || n.VlanTrunk != nil {
 		vlanFiltering = true
 	}
 	// create bridge if necessary
@@ -398,20 +509,6 @@ func setupBridge(n *NetConf) (*netlink.Bridge, *current.Interface, error) {
 	}, nil
 }
 
-// disableIPV6DAD disables IPv6 Duplicate Address Detection (DAD)
-// for an interface, if the interface does not support enhanced_dad.
-// We do this because interfaces with hairpin mode will see their own DAD packets
-func disableIPV6DAD(ifName string) error {
-	// ehanced_dad sends a nonce with the DAD packets, so that we can safely
-	// ignore ourselves
-	enh, err := ioutil.ReadFile(fmt.Sprintf("/proc/sys/net/ipv6/conf/%s/enhanced_dad", ifName))
-	if err == nil && string(enh) == "1\n" {
-		return nil
-	}
-	f := fmt.Sprintf("/proc/sys/net/ipv6/conf/%s/accept_dad", ifName)
-	return ioutil.WriteFile(f, []byte("0"), 0644)
-}
-
 func enableIPForward(family int) error {
 	if family == netlink.FAMILY_V4 {
 		return ip.EnableIP4Forward()
@@ -420,7 +517,7 @@ func enableIPForward(family int) error {
 }
 
 func cmdAdd(args *skel.CmdArgs) error {
-	var success bool = false
+	success := false
 
 	n, cniVersion, err := loadNetConf(args.StdinData, args.Args)
 	if err != nil {
@@ -429,12 +526,16 @@ func cmdAdd(args *skel.CmdArgs) error {
 
 	isLayer3 := n.IPAM.Type != ""
 
+	if isLayer3 && n.DisableContainerInterface {
+		return fmt.Errorf("cannot use IPAM when DisableContainerInterface flag is set")
+	}
+
 	if n.IsDefaultGW {
 		n.IsGW = true
 	}
 
 	if n.HairpinMode && n.PromiscMode {
-		return fmt.Errorf("cannot set hairpin mode and promiscuous mode at the same time.")
+		return fmt.Errorf("cannot set hairpin mode and promiscuous mode at the same time")
 	}
 
 	br, brInterface, err := setupBridge(n)
@@ -448,7 +549,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 	}
 	defer netns.Close()
 
-	hostInterface, containerInterface, err := setupVeth(netns, br, args.IfName, n.MTU, n.HairpinMode, n.Vlan, n.mac)
+	hostInterface, containerInterface, err := setupVeth(netns, br, args.IfName, n.MTU, n.HairpinMode, n.Vlan, n.vlans, n.PreserveDefaultVlan, n.mac)
 	if err != nil {
 		return err
 	}
@@ -499,6 +600,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 
 		result.IPs = ipamResult.IPs
 		result.Routes = ipamResult.Routes
+		result.DNS = ipamResult.DNS
 
 		if len(result.IPs) == 0 {
 			return errors.New("IPAM plugin returned missing IP config")
@@ -512,80 +614,36 @@ func cmdAdd(args *skel.CmdArgs) error {
 
 		// Configure the container hardware address and IP address(es)
 		if err := netns.Do(func(_ ns.NetNS) error {
-			// Disable IPv6 DAD just in case hairpin mode is enabled on the
-			// bridge. Hairpin mode causes echos of neighbor solicitation
-			// packets, which causes DAD failures.
-			for _, ipc := range result.IPs {
-				if ipc.Address.IP.To4() == nil && (n.HairpinMode || n.PromiscMode) {
-					if err := disableIPV6DAD(args.IfName); err != nil {
-						return err
-					}
-					break
-				}
+			if n.EnableDad {
+				_, _ = sysctl.Sysctl(fmt.Sprintf("/net/ipv6/conf/%s/enhanced_dad", args.IfName), "1")
+				_, _ = sysctl.Sysctl(fmt.Sprintf("net/ipv6/conf/%s/accept_dad", args.IfName), "1")
+			} else {
+				_, _ = sysctl.Sysctl(fmt.Sprintf("net/ipv6/conf/%s/accept_dad", args.IfName), "0")
 			}
+			_, _ = sysctl.Sysctl(fmt.Sprintf("net/ipv4/conf/%s/arp_notify", args.IfName), "1")
 
 			// Add the IP to the interface
-			if err := ipam.ConfigureIface(args.IfName, result); err != nil {
-				return err
-			}
-			return nil
-		}); err != nil {
-			return err
-		}
-
-		// check bridge port state
-		retries := []int{0, 50, 500, 1000, 1000}
-		for idx, sleep := range retries {
-			time.Sleep(time.Duration(sleep) * time.Millisecond)
-
-			hostVeth, err := netlink.LinkByName(hostInterface.Name)
-			if err != nil {
-				return err
-			}
-			if hostVeth.Attrs().OperState == netlink.OperUp {
-				break
-			}
-
-			if idx == len(retries)-1 {
-				return fmt.Errorf("bridge port in error state: %s", hostVeth.Attrs().OperState)
-			}
-		}
-
-		// Send a gratuitous arp
-		if err := netns.Do(func(_ ns.NetNS) error {
-			contVeth, err := net.InterfaceByName(args.IfName)
-			if err != nil {
-				return err
-			}
-
-			for _, ipc := range result.IPs {
-				if ipc.Address.IP.To4() != nil {
-					_ = arping.GratuitousArpOverIface(ipc.Address.IP, *contVeth)
-				}
-			}
-			return nil
+			return ipam.ConfigureIface(args.IfName, result)
 		}); err != nil {
 			return err
 		}
 
 		if n.IsGW {
-			var firstV4Addr net.IP
 			var vlanInterface *current.Interface
 			// Set the IP address(es) on the bridge and enable forwarding
 			for _, gws := range []*gwInfo{gwsV4, gwsV6} {
 				for _, gw := range gws.gws {
-					if gw.IP.To4() != nil && firstV4Addr == nil {
-						firstV4Addr = gw.IP
-					}
 					if n.Vlan != 0 {
-						vlanIface, err := ensureVlanInterface(br, n.Vlan)
+						vlanIface, err := ensureVlanInterface(br, n.Vlan, n.PreserveDefaultVlan)
 						if err != nil {
 							return fmt.Errorf("failed to create vlan interface: %v", err)
 						}
 
 						if vlanInterface == nil {
-							vlanInterface = &current.Interface{Name: vlanIface.Attrs().Name,
-								Mac: vlanIface.Attrs().HardwareAddr.String()}
+							vlanInterface = &current.Interface{
+								Name: vlanIface.Attrs().Name,
+								Mac:  vlanIface.Attrs().HardwareAddr.String(),
+							}
 							result.Interfaces = append(result.Interfaces, vlanInterface)
 						}
 
@@ -610,15 +668,58 @@ func cmdAdd(args *skel.CmdArgs) error {
 		}
 
 		if n.IPMasq {
-			chain := utils.FormatChainName(n.Name, args.ContainerID)
-			comment := utils.FormatComment(n.Name, args.ContainerID)
+			ipns := []*net.IPNet{}
 			for _, ipc := range result.IPs {
-				if err = ip.SetupIPMasq(&ipc.Address, chain, comment); err != nil {
-					return err
-				}
+				ipns = append(ipns, &ipc.Address)
+			}
+			if err = ip.SetupIPMasqForNetworks(n.IPMasqBackend, ipns, n.Name, args.IfName, args.ContainerID); err != nil {
+				return err
+			}
+		}
+	} else if !n.DisableContainerInterface {
+		if err := netns.Do(func(_ ns.NetNS) error {
+			link, err := netlink.LinkByName(args.IfName)
+			if err != nil {
+				return fmt.Errorf("failed to retrieve link: %v", err)
+			}
+
+			// If layer 2 we still need to set the container veth to up
+			if err = netlink.LinkSetUp(link); err != nil {
+				return fmt.Errorf("failed to set %q up: %v", args.IfName, err)
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
+
+	hostVeth, err := netlink.LinkByName(hostInterface.Name)
+	if err != nil {
+		return err
+	}
+
+	if !n.DisableContainerInterface {
+		// check bridge port state
+		retries := []int{0, 50, 500, 1000, 1000}
+		for idx, sleep := range retries {
+			time.Sleep(time.Duration(sleep) * time.Millisecond)
+
+			hostVeth, err = netlink.LinkByName(hostInterface.Name)
+			if err != nil {
+				return err
+			}
+			if hostVeth.Attrs().OperState == netlink.OperUp {
+				break
+			}
+
+			if idx == len(retries)-1 {
+				return fmt.Errorf("bridge port in error state: %s", hostVeth.Attrs().OperState)
 			}
 		}
 	}
+
+	// In certain circumstances, the host-side of the veth may change addrs
+	hostInterface.Mac = hostVeth.Attrs().HardwareAddr.String()
 
 	// Refetch the bridge since its MAC address may change when the first
 	// veth is added or after its IP address is set
@@ -628,16 +729,27 @@ func cmdAdd(args *skel.CmdArgs) error {
 	}
 	brInterface.Mac = br.Attrs().HardwareAddr.String()
 
-	result.DNS = n.DNS
-
 	// Return an error requested by testcases, if any
 	if debugPostIPAMError != nil {
 		return debugPostIPAMError
 	}
 
+	// Use incoming DNS settings if provided, otherwise use the
+	// settings that were already configured by the IPAM plugin
+	if dnsConfSet(n.DNS) {
+		result.DNS = n.DNS
+	}
+
 	success = true
 
 	return types.PrintResult(result, cniVersion)
+}
+
+func dnsConfSet(dnsConf types.DNS) bool {
+	return dnsConf.Nameservers != nil ||
+		dnsConf.Search != nil ||
+		dnsConf.Options != nil ||
+		dnsConf.Domain != ""
 }
 
 func cmdDel(args *skel.CmdArgs) error {
@@ -648,14 +760,17 @@ func cmdDel(args *skel.CmdArgs) error {
 
 	isLayer3 := n.IPAM.Type != ""
 
-	if isLayer3 {
-		if err := ipam.ExecDel(n.IPAM.Type, args.StdinData); err != nil {
-			return err
+	ipamDel := func() error {
+		if isLayer3 {
+			if err := ipam.ExecDel(n.IPAM.Type, args.StdinData); err != nil {
+				return err
+			}
 		}
+		return nil
 	}
 
 	if args.Netns == "" {
-		return nil
+		return ipamDel()
 	}
 
 	// There is a netns so try to clean up. Delete can be called multiple times
@@ -670,8 +785,19 @@ func cmdDel(args *skel.CmdArgs) error {
 		}
 		return err
 	})
-
 	if err != nil {
+		//  if NetNs is passed down by the Cloud Orchestration Engine, or if it called multiple times
+		// so don't return an error if the device is already removed.
+		// https://github.com/kubernetes/kubernetes/issues/43014#issuecomment-287164444
+		_, ok := err.(ns.NSPathNotExistErr)
+		if ok {
+			return ipamDel()
+		}
+		return err
+	}
+
+	// call ipam.ExecDel after clean up device in netns
+	if err := ipamDel(); err != nil {
 		return err
 	}
 
@@ -683,12 +809,8 @@ func cmdDel(args *skel.CmdArgs) error {
 	}
 
 	if isLayer3 && n.IPMasq {
-		chain := utils.FormatChainName(n.Name, args.ContainerID)
-		comment := utils.FormatComment(n.Name, args.ContainerID)
-		for _, ipn := range ipnets {
-			if err := ip.TeardownIPMasq(ipn, chain, comment); err != nil {
-				return err
-			}
+		if err := ip.TeardownIPMasqForNetworks(ipnets, n.Name, args.IfName, args.ContainerID); err != nil {
+			return err
 		}
 	}
 
@@ -696,7 +818,13 @@ func cmdDel(args *skel.CmdArgs) error {
 }
 
 func main() {
-	skel.PluginMain(cmdAdd, cmdCheck, cmdDel, version.All, bv.BuildString("bridge"))
+	skel.PluginMainFuncs(skel.CNIFuncs{
+		Add:    cmdAdd,
+		Check:  cmdCheck,
+		Del:    cmdDel,
+		Status: cmdStatus,
+		/* FIXME GC */
+	}, version.All, bv.BuildString("bridge"))
 }
 
 type cniBridgeIf struct {
@@ -708,7 +836,6 @@ type cniBridgeIf struct {
 }
 
 func validateInterface(intf current.Interface, expectInSb bool) (cniBridgeIf, netlink.Link, error) {
-
 	ifFound := cniBridgeIf{found: false}
 	if intf.Name == "" {
 		return ifFound, nil, fmt.Errorf("Interface name missing ")
@@ -733,7 +860,6 @@ func validateInterface(intf current.Interface, expectInSb bool) (cniBridgeIf, ne
 }
 
 func validateCniBrInterface(intf current.Interface, n *NetConf) (cniBridgeIf, error) {
-
 	brFound, link, err := validateInterface(intf, false)
 	if err != nil {
 		return brFound, err
@@ -765,7 +891,6 @@ func validateCniBrInterface(intf current.Interface, n *NetConf) (cniBridgeIf, er
 }
 
 func validateCniVethInterface(intf *current.Interface, brIf cniBridgeIf, contIf cniBridgeIf) (cniBridgeIf, error) {
-
 	vethFound, link, err := validateInterface(*intf, false)
 	if err != nil {
 		return vethFound, err
@@ -809,7 +934,6 @@ func validateCniVethInterface(intf *current.Interface, brIf cniBridgeIf, contIf 
 }
 
 func validateCniContainerInterface(intf current.Interface) (cniBridgeIf, error) {
-
 	vethFound, link, err := validateInterface(intf, true)
 	if err != nil {
 		return vethFound, err
@@ -838,7 +962,6 @@ func validateCniContainerInterface(intf current.Interface) (cniBridgeIf, error) 
 }
 
 func cmdCheck(args *skel.CmdArgs) error {
-
 	n, _, err := loadNetConf(args.StdinData, args.Args)
 	if err != nil {
 		return err
@@ -945,7 +1068,7 @@ func cmdCheck(args *skel.CmdArgs) error {
 	}
 
 	// Check prevResults for ips, routes and dns against values found in the container
-	if err := netns.Do(func(_ ns.NetNS) error {
+	return netns.Do(func(_ ns.NetNS) error {
 		err = ip.ValidateExpectedInterfaceIPs(args.IfName, result.IPs)
 		if err != nil {
 			return err
@@ -956,13 +1079,24 @@ func cmdCheck(args *skel.CmdArgs) error {
 			return err
 		}
 		return nil
-	}); err != nil {
-		return err
-	}
-
-	return nil
+	})
 }
 
 func uniqueID(containerID, cniIface string) string {
 	return containerID + "-" + cniIface
+}
+
+func cmdStatus(args *skel.CmdArgs) error {
+	conf := NetConf{}
+	if err := json.Unmarshal(args.StdinData, &conf); err != nil {
+		return fmt.Errorf("failed to load netconf: %w", err)
+	}
+
+	if conf.IPAM.Type != "" {
+		if err := ipam.ExecStatus(conf.IPAM.Type, args.StdinData); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }

@@ -20,11 +20,12 @@ import (
 	"runtime"
 	"sync"
 
+	"github.com/coreos/go-iptables/iptables"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/containernetworking/plugins/pkg/testutils"
-	"github.com/coreos/go-iptables/iptables"
-	. "github.com/onsi/ginkgo"
-	. "github.com/onsi/gomega"
 )
 
 const TABLE = "filter" // We'll monkey around here
@@ -37,7 +38,6 @@ var _ = Describe("chain tests", func() {
 	var cleanup func()
 
 	beforeEach := func() {
-
 		// Save a reference to the original namespace,
 		// Add a new NS
 		currNs, err := ns.GetCurrentNS()
@@ -83,7 +83,6 @@ var _ = Describe("chain tests", func() {
 			ipt.DeleteChain(TABLE, tlChainName)
 			currNs.Set()
 		}
-
 	}
 
 	It("creates and destroys a chain", func() {
@@ -168,8 +167,7 @@ var _ = Describe("chain tests", func() {
 		rules, err := ipt.List(TABLE, testChain.name)
 		Expect(err).NotTo(HaveOccurred())
 
-		Expect(len(rules)).To(Equal(3))
-
+		Expect(rules).To(HaveLen(3))
 	})
 
 	It("deletes chains idempotently", func() {
@@ -233,6 +231,5 @@ var _ = Describe("chain tests", func() {
 				Fail("Chain was not deleted")
 			}
 		}
-
 	})
 })

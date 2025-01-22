@@ -17,6 +17,8 @@ package main
 import (
 	"fmt"
 	"math"
+	"net"
+	"time"
 
 	"github.com/vishvananda/netlink"
 )
@@ -48,11 +50,11 @@ func createVRF(name string, tableID uint32) (*netlink.Vrf, error) {
 		}
 	}
 
+	linkAttrs := netlink.NewLinkAttrs()
+	linkAttrs.Name = name
 	vrf := &netlink.Vrf{
-		LinkAttrs: netlink.LinkAttrs{
-			Name: name,
-		},
-		Table: tableID,
+		LinkAttrs: linkAttrs,
+		Table:     tableID,
 	}
 
 	err = netlink.LinkAdd(vrf)
@@ -104,6 +106,19 @@ func addInterface(vrf *netlink.Vrf, intf string) error {
 	if err != nil {
 		return fmt.Errorf("failed getting ipv6 addresses for %s", intf)
 	}
+
+	// Save all routes that are not local and connected, before setting master,
+	// because otherwise those routes will be deleted after interface is moved.
+	filter := &netlink.Route{
+		LinkIndex: i.Attrs().Index,
+		Scope:     netlink.SCOPE_UNIVERSE, // Exclude local and connected routes
+	}
+	filterMask := netlink.RT_FILTER_OIF | netlink.RT_FILTER_SCOPE // Filter based on link index and scope
+	routes, err := netlink.RouteListFiltered(netlink.FAMILY_ALL, filter, filterMask)
+	if err != nil {
+		return fmt.Errorf("failed getting all routes for %s", intf)
+	}
+
 	err = netlink.LinkSetMaster(i, vrf)
 	if err != nil {
 		return fmt.Errorf("could not set vrf %s as master of %s: %v", vrf.Name, intf, err)
@@ -111,7 +126,7 @@ func addInterface(vrf *netlink.Vrf, intf string) error {
 
 	afterAddresses, err := netlink.AddrList(i, netlink.FAMILY_V6)
 	if err != nil {
-		return fmt.Errorf("failed getting ipv6 new addresses for %s", intf)
+		return fmt.Errorf("failed getting ipv6 new addresses for %s: %v", intf, err)
 	}
 
 	// Since keeping the ipv6 address depends on net.ipv6.conf.all.keep_addr_on_down ,
@@ -127,6 +142,49 @@ CONTINUE:
 		err = netlink.AddrAdd(i, &toFind)
 		if err != nil {
 			return fmt.Errorf("could not restore address %s to %s @ %s: %v", toFind, intf, vrf.Name, err)
+		}
+
+		// Waits for local/host routes to be added by the kernel.
+		maxRetry := 10
+		for {
+			routesVRFTable, err := netlink.RouteListFiltered(
+				netlink.FAMILY_ALL,
+				&netlink.Route{
+					Dst: &net.IPNet{
+						IP:   toFind.IP,
+						Mask: net.IPMask{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
+					},
+					Table:     int(vrf.Table),
+					LinkIndex: i.Attrs().Index,
+				},
+				netlink.RT_FILTER_OIF|netlink.RT_FILTER_TABLE|netlink.RT_FILTER_DST,
+			)
+			if err != nil {
+				return fmt.Errorf("failed getting routes for %s table %d for dst %s: %v", intf, vrf.Table, toFind.IPNet.String(), err)
+			}
+
+			if len(routesVRFTable) >= 1 {
+				break
+			}
+
+			maxRetry--
+			if maxRetry <= 0 {
+				return fmt.Errorf("failed getting local/host addresses for %s in table %d with dst %s", intf, vrf.Table, toFind.IPNet.String())
+			}
+
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	// Apply all saved routes for the interface that was moved to the VRF
+	for _, route := range routes {
+		r := route
+		// Modify original table to vrf one,
+		r.Table = int(vrf.Table)
+		// equivalent of 'ip route replace <address> table <int>'.
+		err = netlink.RouteReplace(&r)
+		if err != nil {
+			return fmt.Errorf("could not add route '%s': %v", r, err)
 		}
 	}
 
