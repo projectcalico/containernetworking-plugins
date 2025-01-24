@@ -22,18 +22,15 @@ import (
 	"os"
 	"runtime"
 
-	"github.com/j-keck/arping"
 	"github.com/vishvananda/netlink"
 
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
 	current "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/cni/pkg/version"
-
 	"github.com/containernetworking/plugins/pkg/ip"
 	"github.com/containernetworking/plugins/pkg/ipam"
 	"github.com/containernetworking/plugins/pkg/ns"
-	"github.com/containernetworking/plugins/pkg/utils"
 	bv "github.com/containernetworking/plugins/pkg/utils/buildversion"
 )
 
@@ -46,8 +43,9 @@ func init() {
 
 type NetConf struct {
 	types.NetConf
-	IPMasq bool `json:"ipMasq"`
-	MTU    int  `json:"mtu"`
+	IPMasq        bool    `json:"ipMasq"`
+	IPMasqBackend *string `json:"ipMasqBackend,omitempty"`
+	MTU           int     `json:"mtu"`
 }
 
 func setupContainerVeth(netns ns.NetNS, ifName string, mtu int, pr *current.Result) (*current.Interface, *current.Interface, error) {
@@ -83,13 +81,13 @@ func setupContainerVeth(netns ns.NetNS, ifName string, mtu int, pr *current.Resu
 
 		pr.Interfaces = []*current.Interface{hostInterface, containerInterface}
 
-		if err = ipam.ConfigureIface(ifName, pr); err != nil {
-			return err
-		}
-
 		contVeth, err := net.InterfaceByName(ifName)
 		if err != nil {
 			return fmt.Errorf("failed to look up %q: %v", ifName, err)
+		}
+
+		if err = ipam.ConfigureIface(ifName, pr); err != nil {
+			return err
 		}
 
 		for _, ipc := range pr.IPs {
@@ -136,13 +134,6 @@ func setupContainerVeth(netns ns.NetNS, ifName string, mtu int, pr *current.Resu
 				if err := netlink.RouteAdd(&r); err != nil {
 					return fmt.Errorf("failed to add route %v: %v", r, err)
 				}
-			}
-		}
-
-		// Send a gratuitous arp for all v4 addresses
-		for _, ipc := range pr.IPs {
-			if ipc.Address.IP.To4() != nil {
-				_ = arping.GratuitousArpOverIface(ipc.Address.IP, *contVeth)
 			}
 		}
 
@@ -238,12 +229,12 @@ func cmdAdd(args *skel.CmdArgs) error {
 	}
 
 	if conf.IPMasq {
-		chain := utils.FormatChainName(conf.Name, args.ContainerID)
-		comment := utils.FormatComment(conf.Name, args.ContainerID)
+		ipns := []*net.IPNet{}
 		for _, ipc := range result.IPs {
-			if err = ip.SetupIPMasq(&ipc.Address, chain, comment); err != nil {
-				return err
-			}
+			ipns = append(ipns, &ipc.Address)
+		}
+		if err = ip.SetupIPMasqForNetworks(conf.IPMasqBackend, ipns, conf.Name, args.IfName, args.ContainerID); err != nil {
+			return err
 		}
 	}
 
@@ -290,16 +281,20 @@ func cmdDel(args *skel.CmdArgs) error {
 		}
 		return err
 	})
-
 	if err != nil {
+		//  if NetNs is passed down by the Cloud Orchestration Engine, or if it called multiple times
+		// so don't return an error if the device is already removed.
+		// https://github.com/kubernetes/kubernetes/issues/43014#issuecomment-287164444
+		_, ok := err.(ns.NSPathNotExistErr)
+		if ok {
+			return nil
+		}
 		return err
 	}
 
 	if len(ipnets) != 0 && conf.IPMasq {
-		chain := utils.FormatChainName(conf.Name, args.ContainerID)
-		comment := utils.FormatComment(conf.Name, args.ContainerID)
-		for _, ipn := range ipnets {
-			err = ip.TeardownIPMasq(ipn, chain, comment)
+		if err := ip.TeardownIPMasqForNetworks(ipnets, conf.Name, args.IfName, args.ContainerID); err != nil {
+			return err
 		}
 	}
 
@@ -307,7 +302,13 @@ func cmdDel(args *skel.CmdArgs) error {
 }
 
 func main() {
-	skel.PluginMain(cmdAdd, cmdCheck, cmdDel, version.All, bv.BuildString("ptp"))
+	skel.PluginMainFuncs(skel.CNIFuncs{
+		Add:    cmdAdd,
+		Check:  cmdCheck,
+		Del:    cmdDel,
+		Status: cmdStatus,
+		/* FIXME GC */
+	}, version.All, bv.BuildString("ptp"))
 }
 
 func cmdCheck(args *skel.CmdArgs) error {
@@ -359,7 +360,6 @@ func cmdCheck(args *skel.CmdArgs) error {
 	//
 	// Check prevResults for ips, routes and dns against values found in the container
 	if err := netns.Do(func(_ ns.NetNS) error {
-
 		// Check interface against values found in the container
 		err := validateCniContainerInterface(contMap)
 		if err != nil {
@@ -384,7 +384,6 @@ func cmdCheck(args *skel.CmdArgs) error {
 }
 
 func validateCniContainerInterface(intf current.Interface) error {
-
 	var link netlink.Link
 	var err error
 
@@ -408,6 +407,19 @@ func validateCniContainerInterface(intf current.Interface) error {
 		if intf.Mac != link.Attrs().HardwareAddr.String() {
 			return fmt.Errorf("ptp: Interface %s Mac %s doesn't match container Mac: %s", intf.Name, intf.Mac, link.Attrs().HardwareAddr)
 		}
+	}
+
+	return nil
+}
+
+func cmdStatus(args *skel.CmdArgs) error {
+	conf := NetConf{}
+	if err := json.Unmarshal(args.StdinData, &conf); err != nil {
+		return fmt.Errorf("failed to load netconf: %w", err)
+	}
+
+	if err := ipam.ExecStatus(conf.IPAM.Type, args.StdinData); err != nil {
+		return err
 	}
 
 	return nil

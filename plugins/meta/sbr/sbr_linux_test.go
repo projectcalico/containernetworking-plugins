@@ -19,15 +19,14 @@ import (
 	"log"
 	"net"
 
-	"github.com/containernetworking/cni/pkg/skel"
-	"github.com/containernetworking/plugins/pkg/ns"
-	"github.com/containernetworking/plugins/pkg/testutils"
-
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 
-	. "github.com/onsi/ginkgo"
-	. "github.com/onsi/gomega"
+	"github.com/containernetworking/cni/pkg/skel"
+	"github.com/containernetworking/plugins/pkg/ns"
+	"github.com/containernetworking/plugins/pkg/testutils"
 )
 
 // Structures specifying state at start.
@@ -54,7 +53,9 @@ func setup(targetNs ns.NetNS, status netStatus) error {
 	err := targetNs.Do(func(_ ns.NetNS) error {
 		for _, dev := range status.Devices {
 			log.Printf("Adding dev %s\n", dev.Name)
-			link := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: dev.Name}}
+			linkAttrs := netlink.NewLinkAttrs()
+			linkAttrs.Name = dev.Name
+			link := &netlink.Dummy{LinkAttrs: linkAttrs}
 			err := netlink.LinkAdd(link)
 			if err != nil {
 				return err
@@ -114,16 +115,20 @@ func readback(targetNs ns.NetNS, devNames []string) (netStatus, error) {
 			routes, err := netlink.RouteListFiltered(netlink.FAMILY_ALL,
 				routeFilter,
 				netlink.RT_FILTER_OIF|netlink.RT_FILTER_TABLE)
-
 			if err != nil {
 				return err
 			}
 
+			routesNoLinkLocal := []netlink.Route{}
 			for _, route := range routes {
+				if route.Dst.IP.IsLinkLocalMulticast() || route.Dst.IP.IsLinkLocalUnicast() {
+					continue
+				}
 				log.Printf("Got %s route %v", name, route)
+				routesNoLinkLocal = append(routesNoLinkLocal, route)
 			}
 
-			retVal.Devices[i].Routes = routes
+			retVal.Devices[i].Routes = routesNoLinkLocal
 		}
 
 		rules, err := netlink.RuleList(netlink.FAMILY_ALL)
@@ -218,7 +223,8 @@ func createDefaultStatus() netStatus {
 
 	return netStatus{
 		Devices: devs,
-		Rules:   rules}
+		Rules:   rules,
+	}
 }
 
 var _ = Describe("sbr test", func() {
@@ -292,10 +298,12 @@ var _ = Describe("sbr test", func() {
 		expNet1.Routes = append(expNet1.Routes,
 			netlink.Route{
 				Gw:        net.IPv4(192, 168, 1, 1),
+				Dst:       &net.IPNet{IP: net.IPv4zero, Mask: net.IPMask(net.IPv4zero)},
 				Table:     100,
-				LinkIndex: expNet1.Routes[0].LinkIndex})
+				LinkIndex: expNet1.Routes[0].LinkIndex,
+			})
 
-		Expect(len(newStatus.Rules)).To(Equal(1))
+		Expect(newStatus.Rules).To(HaveLen(1))
 		Expect(newStatus.Rules[0].Table).To(Equal(100))
 		Expect(newStatus.Rules[0].Src.String()).To(Equal("192.168.1.209/32"))
 		devNet1 := newStatus.Devices[0]
@@ -323,7 +331,7 @@ var _ = Describe("sbr test", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		// Check results. We expect the rule to have been removed.
-		Expect(len(retVal.Rules)).To(Equal(0))
+		Expect(retVal.Rules).To(BeEmpty())
 	})
 
 	It("Works with a default route already set", func() {
@@ -367,7 +375,8 @@ var _ = Describe("sbr test", func() {
 		preStatus.Devices[1].Routes = append(preStatus.Devices[1].Routes,
 			netlink.Route{
 				Gw:        net.IPv4(192, 168, 1, 1),
-				LinkIndex: routes[0].LinkIndex})
+				LinkIndex: routes[0].LinkIndex,
+			})
 
 		err := setup(targetNs, preStatus)
 		Expect(err).NotTo(HaveOccurred())
@@ -392,7 +401,7 @@ var _ = Describe("sbr test", func() {
 			}
 		}
 
-		Expect(len(newStatus.Rules)).To(Equal(1))
+		Expect(newStatus.Rules).To(HaveLen(1))
 		Expect(newStatus.Rules[0].Table).To(Equal(100))
 		Expect(newStatus.Rules[0].Src.String()).To(Equal("192.168.1.209/32"))
 		devNet1 := newStatus.Devices[0]
@@ -480,7 +489,8 @@ var _ = Describe("sbr test", func() {
 						netlink.Route{
 							Dst:       expNet1.Routes[i].Dst,
 							Table:     101,
-							LinkIndex: expNet1.Routes[i].LinkIndex})
+							LinkIndex: expNet1.Routes[i].LinkIndex,
+						})
 				} else {
 					// All 192.168.1.x routes expected in table 100
 					expNet1.Routes[i].Table = 100
@@ -489,18 +499,22 @@ var _ = Describe("sbr test", func() {
 		}
 		expNet1.Routes = append(expNet1.Routes,
 			netlink.Route{
+				Dst:       &net.IPNet{IP: net.IPv4zero, Mask: net.IPMask(net.IPv4zero)},
 				Gw:        net.IPv4(192, 168, 1, 1),
 				Table:     100,
-				LinkIndex: expNet1.Routes[0].LinkIndex})
+				LinkIndex: expNet1.Routes[0].LinkIndex,
+			})
 
 		expNet1.Routes = append(expNet1.Routes,
 			netlink.Route{
+				Dst:       &net.IPNet{IP: net.IPv4zero, Mask: net.IPMask(net.IPv4zero)},
 				Gw:        net.IPv4(192, 168, 101, 1),
 				Table:     101,
-				LinkIndex: expNet1.Routes[0].LinkIndex})
+				LinkIndex: expNet1.Routes[0].LinkIndex,
+			})
 
 		// 2 Rules will be created for each IP address. (100, 101)
-		Expect(len(newStatus.Rules)).To(Equal(2))
+		Expect(newStatus.Rules).To(HaveLen(2))
 
 		// First entry corresponds to last table
 		Expect(newStatus.Rules[0].Table).To(Equal(101))
@@ -514,7 +528,6 @@ var _ = Describe("sbr test", func() {
 		devEth0 := newStatus.Devices[1]
 		Expect(equalRoutes(expNet1.Routes, devNet1.Routes)).To(BeTrue())
 		Expect(equalRoutes(expEth0.Routes, devEth0.Routes)).To(BeTrue())
-
 	})
 
 	It("fails with CNI spec versions that don't support plugin chaining", func() {
@@ -538,4 +551,80 @@ var _ = Describe("sbr test", func() {
 		Expect(err).To(MatchError("This plugin must be called as chained plugin"))
 	})
 
+	It("Works with Table ID", func() {
+		ifname := "net1"
+		tableID := 5000
+		conf := `{
+	"cniVersion": "0.3.0",
+	"name": "cni-plugin-sbr-test",
+	"type": "sbr",
+	"table": %d,
+	"prevResult": {
+		"cniVersion": "0.3.0",
+		"interfaces": [
+			{
+				"name": "%s",
+				"sandbox": "%s"
+			}
+		],
+		"ips": [
+			{
+				"address": "192.168.1.209/24",
+				"interface": 0
+			},
+			{
+				"address": "192.168.101.209/24",
+				"interface": 0
+			}
+		],
+		"routes": []
+	}
+}`
+		conf = fmt.Sprintf(conf, tableID, ifname, targetNs.Path())
+		args := &skel.CmdArgs{
+			ContainerID: "dummy",
+			Netns:       targetNs.Path(),
+			IfName:      ifname,
+			StdinData:   []byte(conf),
+		}
+
+		preStatus := createDefaultStatus()
+
+		err := setup(targetNs, preStatus)
+		Expect(err).NotTo(HaveOccurred())
+
+		oldStatus, err := readback(targetNs, []string{"net1", "eth0"})
+		Expect(err).NotTo(HaveOccurred())
+
+		_, _, err = testutils.CmdAddWithArgs(args, func() error { return cmdAdd(args) })
+		Expect(err).NotTo(HaveOccurred())
+
+		newStatus, err := readback(targetNs, []string{"net1", "eth0"})
+		Expect(err).NotTo(HaveOccurred())
+
+		// Routes have not been moved.
+		Expect(newStatus).To(Equal(oldStatus))
+
+		// Fetch all rules for the requested table ID.
+		var rules []netlink.Rule
+		err = targetNs.Do(func(_ ns.NetNS) error {
+			var err error
+			rules, err = netlink.RuleListFiltered(
+				netlink.FAMILY_ALL, &netlink.Rule{
+					Table: tableID,
+				},
+				netlink.RT_FILTER_TABLE,
+			)
+			return err
+		})
+
+		Expect(err).NotTo(HaveOccurred())
+		Expect(rules).To(HaveLen(2))
+
+		// Both IPs have been added as source based routes with requested table ID.
+		Expect(rules[0].Table).To(Equal(tableID))
+		Expect(rules[0].Src.String()).To(Equal("192.168.101.209/32"))
+		Expect(rules[1].Table).To(Equal(tableID))
+		Expect(rules[1].Src.String()).To(Equal("192.168.1.209/32"))
+	})
 })

@@ -15,6 +15,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"math/rand"
@@ -24,8 +25,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/d2g/dhcp4"
-	"github.com/d2g/dhcp4client"
+	dhcp4 "github.com/insomniacslk/dhcp/dhcpv4"
+	"github.com/insomniacslk/dhcp/dhcpv4/nclient4"
 	"github.com/vishvananda/netlink"
 
 	"github.com/containernetworking/cni/pkg/types"
@@ -34,13 +35,19 @@ import (
 
 // RFC 2131 suggests using exponential backoff, starting with 4sec
 // and randomized to +/- 1sec
-const resendDelay0 = 4 * time.Second
-const resendDelayMax = 62 * time.Second
+const (
+	resendDelay0         = 4 * time.Second
+	resendDelayMax       = 62 * time.Second
+	defaultLeaseTime     = 60 * time.Minute
+	defaultResendTimeout = 208 * time.Second // fast resend + backoff resend
+)
 
 // To speed up the retry for first few failures, we retry without
 // backoff for a few times
-const resendFastDelay = 2 * time.Second
-const resendFastMax = 4
+const (
+	resendFastDelay = 2 * time.Second
+	resendFastMax   = 4
+)
 
 const (
 	leaseStateBound = iota
@@ -56,31 +63,36 @@ const (
 
 type DHCPLease struct {
 	clientID      string
-	ack           *dhcp4.Packet
-	opts          dhcp4.Options
+	latestLease   *nclient4.Lease
 	link          netlink.Link
 	renewalTime   time.Time
 	rebindingTime time.Time
 	expireTime    time.Time
 	timeout       time.Duration
 	resendMax     time.Duration
+	resendTimeout time.Duration
 	broadcast     bool
 	stopping      uint32
 	stop          chan struct{}
+	check         chan struct{}
 	wg            sync.WaitGroup
+	cancelFunc    context.CancelFunc
+	ctx           context.Context
 	// list of requesting and providing options and if they are necessary / their value
-	optsRequesting map[dhcp4.OptionCode]bool
-	optsProviding  map[dhcp4.OptionCode][]byte
+	opts []dhcp4.Option
 }
 
-var requestOptionsDefault = map[dhcp4.OptionCode]bool{
-	dhcp4.OptionRouter:     true,
-	dhcp4.OptionSubnetMask: true,
+var requestOptionsDefault = []dhcp4.OptionCode{
+	dhcp4.OptionRouter,
+	dhcp4.OptionSubnetMask,
 }
 
-func prepareOptions(cniArgs string, ProvideOptions []ProvideOption, RequestOptions []RequestOption) (
-	optsRequesting map[dhcp4.OptionCode]bool, optsProviding map[dhcp4.OptionCode][]byte, err error) {
+func prepareOptions(cniArgs string, provideOptions []ProvideOption, requestOptions []RequestOption) (
+	[]dhcp4.Option, error,
+) {
+	var opts []dhcp4.Option
 
+	var err error
 	// parse CNI args
 	cniArgsParsed := map[string]string{}
 	for _, argPair := range strings.Split(cniArgs, ";") {
@@ -92,50 +104,51 @@ func prepareOptions(cniArgs string, ProvideOptions []ProvideOption, RequestOptio
 
 	// parse providing options map
 	var optParsed dhcp4.OptionCode
-	optsProviding = make(map[dhcp4.OptionCode][]byte)
-	for _, opt := range ProvideOptions {
+	for _, opt := range provideOptions {
 		optParsed, err = parseOptionName(string(opt.Option))
 		if err != nil {
-			err = fmt.Errorf("Can not parse option %q: %w", opt.Option, err)
-			return
+			return nil, fmt.Errorf("Can not parse option %q: %w", opt.Option, err)
 		}
 		if len(opt.Value) > 0 {
 			if len(opt.Value) > 255 {
-				err = fmt.Errorf("value too long for option %q: %q", opt.Option, opt.Value)
-				return
+				return nil, fmt.Errorf("value too long for option %q: %q", opt.Option, opt.Value)
 			}
-			optsProviding[optParsed] = []byte(opt.Value)
+			opts = append(opts, dhcp4.Option{Code: optParsed, Value: dhcp4.String(opt.Value)})
 		}
 		if value, ok := cniArgsParsed[opt.ValueFromCNIArg]; ok {
 			if len(value) > 255 {
-				err = fmt.Errorf("value too long for option %q from CNI_ARGS %q: %q", opt.Option, opt.ValueFromCNIArg, opt.Value)
-				return
+				return nil, fmt.Errorf("value too long for option %q from CNI_ARGS %q: %q", opt.Option, opt.ValueFromCNIArg, opt.Value)
 			}
-			optsProviding[optParsed] = []byte(value)
+			opts = append(opts, dhcp4.Option{Code: optParsed, Value: dhcp4.String(value)})
 		}
 	}
 
 	// parse necessary options map
-	optsRequesting = make(map[dhcp4.OptionCode]bool)
+	var optsRequesting dhcp4.OptionCodeList
 	skipRequireDefault := false
-	for _, opt := range RequestOptions {
+	for _, opt := range requestOptions {
 		if opt.SkipDefault {
 			skipRequireDefault = true
 		}
+		if opt.Option == "" {
+			continue
+		}
 		optParsed, err = parseOptionName(string(opt.Option))
 		if err != nil {
-			err = fmt.Errorf("Can not parse option %q: %w", opt.Option, err)
-			return
+			return nil, fmt.Errorf("Can not parse option %q: %w", opt.Option, err)
 		}
-		optsRequesting[optParsed] = true
+		optsRequesting.Add(optParsed)
 	}
-	for k, v := range requestOptionsDefault {
-		// only set if not skipping default and this value does not exists
-		if _, ok := optsRequesting[k]; !ok && !skipRequireDefault {
-			optsRequesting[k] = v
+	if !skipRequireDefault {
+		for _, opt := range requestOptionsDefault {
+			optsRequesting.Add(opt)
 		}
 	}
-	return
+	if len(optsRequesting) > 0 {
+		opts = append(opts, dhcp4.Option{Code: dhcp4.OptionParameterRequestList, Value: optsRequesting})
+	}
+
+	return opts, err
 }
 
 // AcquireLease gets an DHCP lease and then maintains it in the background
@@ -143,18 +156,25 @@ func prepareOptions(cniArgs string, ProvideOptions []ProvideOption, RequestOptio
 // calling DHCPLease.Stop()
 func AcquireLease(
 	clientID, netns, ifName string,
-	optsRequesting map[dhcp4.OptionCode]bool, optsProviding map[dhcp4.OptionCode][]byte,
-	timeout, resendMax time.Duration, broadcast bool,
+	opts []dhcp4.Option,
+	timeout, resendMax time.Duration, resendTimeout time.Duration, broadcast bool,
 ) (*DHCPLease, error) {
 	errCh := make(chan error, 1)
+
+	ctx := context.Background()
+	ctx, cancel := context.WithCancel(ctx)
+
 	l := &DHCPLease{
-		clientID:       clientID,
-		stop:           make(chan struct{}),
-		timeout:        timeout,
-		resendMax:      resendMax,
-		broadcast:      broadcast,
-		optsRequesting: optsRequesting,
-		optsProviding:  optsProviding,
+		clientID:      clientID,
+		stop:          make(chan struct{}),
+		check:         make(chan struct{}),
+		timeout:       timeout,
+		resendMax:     resendMax,
+		resendTimeout: resendTimeout,
+		broadcast:     broadcast,
+		opts:          opts,
+		cancelFunc:    cancel,
+		ctx:           ctx,
 	}
 
 	log.Printf("%v: acquiring lease", clientID)
@@ -196,84 +216,74 @@ func AcquireLease(
 func (l *DHCPLease) Stop() {
 	if atomic.CompareAndSwapUint32(&l.stopping, 0, 1) {
 		close(l.stop)
+		l.cancelFunc()
 	}
 	l.wg.Wait()
 }
 
+func (l *DHCPLease) Check() {
+	l.check <- struct{}{}
+}
+
+func withClientID(clientID string) dhcp4.Modifier {
+	return func(d *dhcp4.DHCPv4) {
+		optClientID := []byte{0}
+		optClientID = append(optClientID, []byte(clientID)...)
+		d.Options.Update(dhcp4.OptClientIdentifier(optClientID))
+	}
+}
+
+func withAllOptions(l *DHCPLease) dhcp4.Modifier {
+	return func(d *dhcp4.DHCPv4) {
+		for _, opt := range l.opts {
+			d.Options.Update(opt)
+		}
+	}
+}
+
 func (l *DHCPLease) acquire() error {
-	c, err := newDHCPClient(l.link, l.clientID, l.timeout, l.broadcast)
+	if (l.link.Attrs().Flags & net.FlagUp) != net.FlagUp {
+		log.Printf("Link %q down. Attempting to set up", l.link.Attrs().Name)
+		if err := netlink.LinkSetUp(l.link); err != nil {
+			return err
+		}
+	}
+
+	c, err := newDHCPClient(l.link, l.timeout)
 	if err != nil {
 		return err
 	}
 	defer c.Close()
 
-	if (l.link.Attrs().Flags & net.FlagUp) != net.FlagUp {
-		log.Printf("Link %q down. Attempting to set up", l.link.Attrs().Name)
-		if err = netlink.LinkSetUp(l.link); err != nil {
-			return err
-		}
-	}
-
-	opts := make(dhcp4.Options)
-	opts[dhcp4.OptionClientIdentifier] = []byte(l.clientID)
-	opts[dhcp4.OptionParameterRequestList] = []byte{}
-	for k := range l.optsRequesting {
-		opts[dhcp4.OptionParameterRequestList] = append(opts[dhcp4.OptionParameterRequestList], byte(k))
-	}
-	for k, v := range l.optsProviding {
-		opts[k] = v
-	}
-	// client identifier's first byte is "type"
-	newClientID := []byte{0}
-	newClientID = append(newClientID, opts[dhcp4.OptionClientIdentifier]...)
-	opts[dhcp4.OptionClientIdentifier] = newClientID
-
-	pkt, err := backoffRetry(l.resendMax, func() (*dhcp4.Packet, error) {
-		ok, ack, err := DhcpRequest(c, opts)
-		switch {
-		case err != nil:
-			return nil, err
-		case !ok:
-			return nil, fmt.Errorf("DHCP server NACK'd own offer")
-		default:
-			return &ack, nil
-		}
+	timeoutCtx, cancel := context.WithTimeoutCause(l.ctx, l.resendTimeout, errNoMoreTries)
+	defer cancel()
+	pkt, err := backoffRetry(timeoutCtx, l.resendMax, func() (*nclient4.Lease, error) {
+		return c.Request(
+			timeoutCtx,
+			withClientID(l.clientID),
+			withAllOptions(l),
+		)
 	})
 	if err != nil {
 		return err
 	}
 
-	return l.commit(pkt)
+	l.commit(pkt)
+	return nil
 }
 
-func (l *DHCPLease) commit(ack *dhcp4.Packet) error {
-	opts := ack.ParseOptions()
+func (l *DHCPLease) commit(lease *nclient4.Lease) {
+	l.latestLease = lease
+	ack := lease.ACK
 
-	leaseTime, err := parseLeaseTime(opts)
-	if err != nil {
-		return err
-	}
-
-	rebindingTime, err := parseRebindingTime(opts)
-	if err != nil || rebindingTime > leaseTime {
-		// Per RFC 2131 Section 4.4.5, it should default to 85% of lease time
-		rebindingTime = leaseTime * 85 / 100
-	}
-
-	renewalTime, err := parseRenewalTime(opts)
-	if err != nil || renewalTime > rebindingTime {
-		// Per RFC 2131 Section 4.4.5, it should default to 50% of lease time
-		renewalTime = leaseTime / 2
-	}
+	leaseTime := ack.IPAddressLeaseTime(defaultLeaseTime)
+	rebindingTime := ack.IPAddressRebindingTime(leaseTime * 85 / 100)
+	renewalTime := ack.IPAddressRenewalTime(leaseTime / 2)
 
 	now := time.Now()
 	l.expireTime = now.Add(leaseTime)
 	l.renewalTime = now.Add(renewalTime)
 	l.rebindingTime = now.Add(rebindingTime)
-	l.ack = ack
-	l.opts = opts
-
-	return nil
 }
 
 func (l *DHCPLease) maintain() {
@@ -284,7 +294,7 @@ func (l *DHCPLease) maintain() {
 
 		switch state {
 		case leaseStateBound:
-			sleepDur = l.renewalTime.Sub(time.Now())
+			sleepDur = time.Until(l.renewalTime)
 			if sleepDur <= 0 {
 				log.Printf("%v: renewing lease", l.clientID)
 				state = leaseStateRenewing
@@ -296,7 +306,7 @@ func (l *DHCPLease) maintain() {
 				log.Printf("%v: %v", l.clientID, err)
 
 				if time.Now().After(l.rebindingTime) {
-					log.Printf("%v: renawal time expired, rebinding", l.clientID)
+					log.Printf("%v: renewal time expired, rebinding", l.clientID)
 					state = leaseStateRebinding
 				}
 			} else {
@@ -322,6 +332,9 @@ func (l *DHCPLease) maintain() {
 		select {
 		case <-time.After(sleepDur):
 
+		case <-l.check:
+			log.Printf("%v: Checking lease", l.clientID)
+
 		case <-l.stop:
 			if err := l.release(); err != nil {
 				log.Printf("%v: failed to release DHCP lease: %v", l.clientID, err)
@@ -338,47 +351,40 @@ func (l *DHCPLease) downIface() {
 }
 
 func (l *DHCPLease) renew() error {
-	c, err := newDHCPClient(l.link, l.clientID, l.timeout, l.broadcast)
+	c, err := newDHCPClient(l.link, l.timeout)
 	if err != nil {
 		return err
 	}
 	defer c.Close()
 
-	opts := make(dhcp4.Options)
-	opts[dhcp4.OptionClientIdentifier] = []byte(l.clientID)
-
-	pkt, err := backoffRetry(l.resendMax, func() (*dhcp4.Packet, error) {
-		ok, ack, err := DhcpRenew(c, *l.ack, opts)
-		switch {
-		case err != nil:
-			return nil, err
-		case !ok:
-			return nil, fmt.Errorf("DHCP server did not renew lease")
-		default:
-			return &ack, nil
-		}
+	timeoutCtx, cancel := context.WithTimeoutCause(l.ctx, l.resendTimeout, errNoMoreTries)
+	defer cancel()
+	lease, err := backoffRetry(timeoutCtx, l.resendMax, func() (*nclient4.Lease, error) {
+		return c.Renew(
+			timeoutCtx,
+			l.latestLease,
+			withClientID(l.clientID),
+			withAllOptions(l),
+		)
 	})
 	if err != nil {
 		return err
 	}
 
-	l.commit(pkt)
+	l.commit(lease)
 	return nil
 }
 
 func (l *DHCPLease) release() error {
 	log.Printf("%v: releasing lease", l.clientID)
 
-	c, err := newDHCPClient(l.link, l.clientID, l.timeout, l.broadcast)
+	c, err := newDHCPClient(l.link, l.timeout)
 	if err != nil {
 		return err
 	}
 	defer c.Close()
 
-	opts := make(dhcp4.Options)
-	opts[dhcp4.OptionClientIdentifier] = []byte(l.clientID)
-
-	if err = DhcpRelease(c, *l.ack, opts); err != nil {
+	if err = c.Release(l.latestLease, withClientID(l.clientID)); err != nil {
 		return fmt.Errorf("failed to send DHCPRELEASE")
 	}
 
@@ -386,33 +392,47 @@ func (l *DHCPLease) release() error {
 }
 
 func (l *DHCPLease) IPNet() (*net.IPNet, error) {
-	mask := parseSubnetMask(l.opts)
+	ack := l.latestLease.ACK
+
+	mask := ack.SubnetMask()
 	if mask == nil {
 		return nil, fmt.Errorf("DHCP option Subnet Mask not found in DHCPACK")
 	}
 
 	return &net.IPNet{
-		IP:   l.ack.YIAddr(),
+		IP:   ack.YourIPAddr,
 		Mask: mask,
 	}, nil
 }
 
 func (l *DHCPLease) Gateway() net.IP {
-	return parseRouter(l.opts)
+	ack := l.latestLease.ACK
+	gws := ack.Router()
+	if len(gws) > 0 {
+		return gws[0]
+	}
+	return nil
 }
 
 func (l *DHCPLease) Routes() []*types.Route {
 	routes := []*types.Route{}
 
+	ack := l.latestLease.ACK
+
 	// RFC 3442 states that if Classless Static Routes (option 121)
 	// exist, we ignore Static Routes (option 33) and the Router/Gateway.
-	opt121_routes := parseCIDRRoutes(l.opts)
-	if len(opt121_routes) > 0 {
-		return append(routes, opt121_routes...)
+	opt121Routes := ack.ClasslessStaticRoute()
+	if len(opt121Routes) > 0 {
+		for _, r := range opt121Routes {
+			routes = append(routes, &types.Route{Dst: *r.Dest, GW: r.Router})
+		}
+		return routes
 	}
 
 	// Append Static Routes
-	routes = append(routes, parseRoutes(l.opts)...)
+	if ack.Options.Has(dhcp4.OptionStaticRoutingTable) {
+		routes = append(routes, parseRoutes(ack.Options.Get(dhcp4.OptionStaticRoutingTable))...)
+	}
 
 	// The CNI spec says even if there is a gateway specified, we must
 	// add a default route in the routes section.
@@ -429,10 +449,10 @@ func jitter(span time.Duration) time.Duration {
 	return time.Duration(float64(span) * (2.0*rand.Float64() - 1.0))
 }
 
-func backoffRetry(resendMax time.Duration, f func() (*dhcp4.Packet, error)) (*dhcp4.Packet, error) {
-	var baseDelay time.Duration = resendDelay0
+func backoffRetry(ctx context.Context, resendMax time.Duration, f func() (*nclient4.Lease, error)) (*nclient4.Lease, error) {
+	baseDelay := resendDelay0
 	var sleepTime time.Duration
-	var fastRetryLimit = resendFastMax
+	fastRetryLimit := resendFastMax
 	for {
 		pkt, err := f()
 		if err == nil {
@@ -450,33 +470,23 @@ func backoffRetry(resendMax time.Duration, f func() (*dhcp4.Packet, error)) (*dh
 
 		log.Printf("retrying in %f seconds", sleepTime.Seconds())
 
-		time.Sleep(sleepTime)
-
-		// only adjust delay time if we are in normal backoff stage
-		if baseDelay < resendMax && fastRetryLimit == 0 {
-			baseDelay *= 2
-		} else {
-			break
+		select {
+		case <-ctx.Done():
+			return nil, context.Cause(ctx)
+		case <-time.After(sleepTime):
+			// only adjust delay time if we are in normal backoff stage
+			if baseDelay < resendMax && fastRetryLimit == 0 {
+				baseDelay *= 2
+			}
 		}
 	}
-
-	return nil, errNoMoreTries
 }
 
 func newDHCPClient(
-	link netlink.Link, clientID string,
+	link netlink.Link,
 	timeout time.Duration,
-	broadcast bool,
-) (*dhcp4client.Client, error) {
-	pktsock, err := dhcp4client.NewPacketSock(link.Attrs().Index)
-	if err != nil {
-		return nil, err
-	}
-
-	return dhcp4client.New(
-		dhcp4client.HardwareAddr(link.Attrs().HardwareAddr),
-		dhcp4client.Timeout(timeout),
-		dhcp4client.Broadcast(broadcast),
-		dhcp4client.Connection(pktsock),
-	)
+	clientOpts ...nclient4.ClientOpt,
+) (*nclient4.Client, error) {
+	clientOpts = append(clientOpts, nclient4.WithTimeout(timeout))
+	return nclient4.New(link.Attrs().Name, clientOpts...)
 }

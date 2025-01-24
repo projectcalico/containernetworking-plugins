@@ -26,7 +26,6 @@ import (
 	"github.com/containernetworking/cni/pkg/types"
 	current "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/cni/pkg/version"
-
 	bv "github.com/containernetworking/plugins/pkg/utils/buildversion"
 )
 
@@ -46,7 +45,26 @@ type FirewallNetConf struct {
 	// the firewalld backend is used but the zone is not given, it defaults
 	// to 'trusted'
 	FirewalldZone string `json:"firewalldZone,omitempty"`
+
+	// IngressPolicy is an optional ingress policy.
+	// Defaults to "open".
+	IngressPolicy IngressPolicy `json:"ingressPolicy,omitempty"`
 }
+
+// IngressPolicy is an ingress policy string.
+type IngressPolicy = string
+
+const (
+	// IngressPolicyOpen ("open"): all inbound connections to the container are accepted.
+	// IngressPolicyOpen is the default ingress policy.
+	IngressPolicyOpen IngressPolicy = "open"
+
+	// IngressPolicySameBridge ("same-bridge"): connections from the same bridge are accepted, others are blocked.
+	// This is similar to how Docker libnetwork works.
+	// IngressPolicySameBridge executes `iptables` regardless to the value of `Backend`.
+	// IngressPolicySameBridge may not work as expected for non-bridge networks.
+	IngressPolicySameBridge IngressPolicy = "same-bridge"
+)
 
 type FirewallBackend interface {
 	Add(*FirewallNetConf, *current.Result) error
@@ -98,12 +116,12 @@ func getBackend(conf *FirewallNetConf) (FirewallBackend, error) {
 	case "iptables":
 		return newIptablesBackend(conf)
 	case "firewalld":
-		return newFirewalldBackend(conf)
+		return newFirewalldBackend()
 	}
 
 	// Default to firewalld if it's running
 	if isFirewalldRunning() {
-		return newFirewalldBackend(conf)
+		return newFirewalldBackend()
 	}
 
 	// Otherwise iptables
@@ -126,6 +144,10 @@ func cmdAdd(args *skel.CmdArgs) error {
 	}
 
 	if err := backend.Add(conf, result); err != nil {
+		return err
+	}
+
+	if err := setupIngressPolicy(conf, result); err != nil {
 		return err
 	}
 
@@ -153,11 +175,17 @@ func cmdDel(args *skel.CmdArgs) error {
 		return err
 	}
 
-	return nil
+	return teardownIngressPolicy(conf)
 }
 
 func main() {
-	skel.PluginMain(cmdAdd, cmdCheck, cmdDel, version.VersionsStartingFrom("0.4.0"), bv.BuildString("firewall"))
+	skel.PluginMainFuncs(skel.CNIFuncs{
+		Add:   cmdAdd,
+		Check: cmdCheck,
+		Del:   cmdDel,
+		/* FIXME GC */
+		/* FIXME Status */
+	}, version.VersionsStartingFrom("0.4.0"), bv.BuildString("firewall"))
 }
 
 func cmdCheck(args *skel.CmdArgs) error {
@@ -176,9 +204,5 @@ func cmdCheck(args *skel.CmdArgs) error {
 		return err
 	}
 
-	if err := backend.Check(conf, result); err != nil {
-		return err
-	}
-
-	return nil
+	return backend.Check(conf, result)
 }

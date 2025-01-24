@@ -18,28 +18,27 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"runtime"
 
-	"github.com/j-keck/arping"
 	"github.com/vishvananda/netlink"
 
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
 	current "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/cni/pkg/version"
-
 	"github.com/containernetworking/plugins/pkg/ip"
 	"github.com/containernetworking/plugins/pkg/ipam"
 	"github.com/containernetworking/plugins/pkg/ns"
 	bv "github.com/containernetworking/plugins/pkg/utils/buildversion"
+	"github.com/containernetworking/plugins/pkg/utils/sysctl"
 )
 
 type NetConf struct {
 	types.NetConf
-	Master string `json:"master"`
-	Mode   string `json:"mode"`
-	MTU    int    `json:"mtu"`
+	Master     string `json:"master"`
+	Mode       string `json:"mode"`
+	MTU        int    `json:"mtu"`
+	LinkContNs bool   `json:"linkInContainer,omitempty"`
 }
 
 func init() {
@@ -49,9 +48,9 @@ func init() {
 	runtime.LockOSThread()
 }
 
-func loadConf(bytes []byte, cmdCheck bool) (*NetConf, string, error) {
+func loadConf(args *skel.CmdArgs, cmdCheck bool) (*NetConf, string, error) {
 	n := &NetConf{}
-	if err := json.Unmarshal(bytes, n); err != nil {
+	if err := json.Unmarshal(args.StdinData, n); err != nil {
 		return nil, "", fmt.Errorf("failed to load netconf: %v", err)
 	}
 
@@ -74,8 +73,8 @@ func loadConf(bytes []byte, cmdCheck bool) (*NetConf, string, error) {
 	}
 	if n.Master == "" {
 		if result == nil {
-			defaultRouteInterface, err := getDefaultRouteInterfaceName()
-
+			var defaultRouteInterface string
+			defaultRouteInterface, err = getNamespacedDefaultRouteInterfaceName(args.Netns, n.LinkContNs)
 			if err != nil {
 				return nil, "", err
 			}
@@ -125,7 +124,15 @@ func createIpvlan(conf *NetConf, ifName string, netns ns.NetNS) (*current.Interf
 		return nil, err
 	}
 
-	m, err := netlink.LinkByName(conf.Master)
+	var m netlink.Link
+	if conf.LinkContNs {
+		err = netns.Do(func(_ ns.NetNS) error {
+			m, err = netlink.LinkByName(conf.Master)
+			return err
+		})
+	} else {
+		m, err = netlink.LinkByName(conf.Master)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to lookup master %q: %v", conf.Master, err)
 	}
@@ -137,18 +144,25 @@ func createIpvlan(conf *NetConf, ifName string, netns ns.NetNS) (*current.Interf
 		return nil, err
 	}
 
+	linkAttrs := netlink.NewLinkAttrs()
+	linkAttrs.MTU = conf.MTU
+	linkAttrs.Name = tmpName
+	linkAttrs.ParentIndex = m.Attrs().Index
+	linkAttrs.Namespace = netlink.NsFd(int(netns.Fd()))
+
 	mv := &netlink.IPVlan{
-		LinkAttrs: netlink.LinkAttrs{
-			MTU:         conf.MTU,
-			Name:        tmpName,
-			ParentIndex: m.Attrs().Index,
-			Namespace:   netlink.NsFd(int(netns.Fd())),
-		},
-		Mode: mode,
+		LinkAttrs: linkAttrs,
+		Mode:      mode,
 	}
 
-	if err := netlink.LinkAdd(mv); err != nil {
-		return nil, fmt.Errorf("failed to create ipvlan: %v", err)
+	if conf.LinkContNs {
+		err = netns.Do(func(_ ns.NetNS) error {
+			return netlink.LinkAdd(mv)
+		})
+	} else {
+		if err := netlink.LinkAdd(mv); err != nil {
+			return nil, fmt.Errorf("failed to create ipvlan: %v", err)
+		}
 	}
 
 	err = netns.Do(func(_ ns.NetNS) error {
@@ -182,7 +196,7 @@ func getDefaultRouteInterfaceName() (string, error) {
 	}
 
 	for _, v := range routeToDstIP {
-		if v.Dst == nil {
+		if ip.IsIPNetZero(v.Dst) {
 			l, err := netlink.LinkByIndex(v.LinkIndex)
 			if err != nil {
 				return "", err
@@ -194,8 +208,31 @@ func getDefaultRouteInterfaceName() (string, error) {
 	return "", fmt.Errorf("no default route interface found")
 }
 
+func getNamespacedDefaultRouteInterfaceName(namespace string, inContainer bool) (string, error) {
+	if !inContainer {
+		return getDefaultRouteInterfaceName()
+	}
+	netns, err := ns.GetNS(namespace)
+	if err != nil {
+		return "", fmt.Errorf("failed to open netns %q: %v", netns, err)
+	}
+	defer netns.Close()
+	var defaultRouteInterface string
+	err = netns.Do(func(_ ns.NetNS) error {
+		defaultRouteInterface, err = getDefaultRouteInterfaceName()
+		if err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return defaultRouteInterface, nil
+}
+
 func cmdAdd(args *skel.CmdArgs) error {
-	n, cniVersion, err := loadConf(args.StdinData, false)
+	n, cniVersion, err := loadConf(args, false)
 	if err != nil {
 		return err
 	}
@@ -256,21 +293,10 @@ func cmdAdd(args *skel.CmdArgs) error {
 	result.Interfaces = []*current.Interface{ipvlanInterface}
 
 	err = netns.Do(func(_ ns.NetNS) error {
-		if err := ipam.ConfigureIface(args.IfName, result); err != nil {
-			return err
-		}
+		_, _ = sysctl.Sysctl(fmt.Sprintf("net/ipv4/conf/%s/arp_notify", args.IfName), "1")
+		_, _ = sysctl.Sysctl(fmt.Sprintf("net/ipv6/conf/%s/ndisc_notify", args.IfName), "1")
 
-		contVeth, err := net.InterfaceByName(args.IfName)
-		if err != nil {
-			return fmt.Errorf("failed to look up %q: %v", args.IfName, err)
-		}
-
-		for _, ipc := range result.IPs {
-			if ipc.Address.IP.To4() != nil {
-				_ = arping.GratuitousArpOverIface(ipc.Address.IP, *contVeth)
-			}
-		}
-		return nil
+		return ipam.ConfigureIface(args.IfName, result)
 	})
 	if err != nil {
 		return err
@@ -282,7 +308,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 }
 
 func cmdDel(args *skel.CmdArgs) error {
-	n, _, err := loadConf(args.StdinData, false)
+	n, _, err := loadConf(args, false)
 	if err != nil {
 		return err
 	}
@@ -309,17 +335,32 @@ func cmdDel(args *skel.CmdArgs) error {
 		}
 		return nil
 	})
+	if err != nil {
+		//  if NetNs is passed down by the Cloud Orchestration Engine, or if it called multiple times
+		// so don't return an error if the device is already removed.
+		// https://github.com/kubernetes/kubernetes/issues/43014#issuecomment-287164444
+		_, ok := err.(ns.NSPathNotExistErr)
+		if ok {
+			return nil
+		}
+		return err
+	}
 
 	return err
 }
 
 func main() {
-	skel.PluginMain(cmdAdd, cmdCheck, cmdDel, version.All, bv.BuildString("ipvlan"))
+	skel.PluginMainFuncs(skel.CNIFuncs{
+		Add:    cmdAdd,
+		Check:  cmdCheck,
+		Del:    cmdDel,
+		Status: cmdStatus,
+		/* FIXME GC */
+	}, version.All, bv.BuildString("ipvlan"))
 }
 
 func cmdCheck(args *skel.CmdArgs) error {
-
-	n, _, err := loadConf(args.StdinData, true)
+	n, _, err := loadConf(args, true)
 	if err != nil {
 		return err
 	}
@@ -368,16 +409,23 @@ func cmdCheck(args *skel.CmdArgs) error {
 			contMap.Sandbox, args.Netns)
 	}
 
-	m, err := netlink.LinkByName(n.Master)
+	if n.LinkContNs {
+		err = netns.Do(func(_ ns.NetNS) error {
+			_, err = netlink.LinkByName(n.Master)
+			return err
+		})
+	} else {
+		_, err = netlink.LinkByName(n.Master)
+	}
+
 	if err != nil {
 		return fmt.Errorf("failed to lookup master %q: %v", n.Master, err)
 	}
 
 	// Check prevResults for ips, routes and dns against values found in the container
 	if err := netns.Do(func(_ ns.NetNS) error {
-
 		// Check interface against values found in the container
-		err := validateCniContainerInterface(contMap, m.Attrs().Index, n.Mode)
+		err := validateCniContainerInterface(contMap, n.Mode)
 		if err != nil {
 			return err
 		}
@@ -399,8 +447,7 @@ func cmdCheck(args *skel.CmdArgs) error {
 	return nil
 }
 
-func validateCniContainerInterface(intf current.Interface, masterIndex int, modeExpected string) error {
-
+func validateCniContainerInterface(intf current.Interface, modeExpected string) error {
 	var link netlink.Link
 	var err error
 
@@ -421,6 +468,9 @@ func validateCniContainerInterface(intf current.Interface, masterIndex int, mode
 	}
 
 	mode, err := modeFromString(modeExpected)
+	if err != nil {
+		return err
+	}
 	if ipv.Mode != mode {
 		currString, err := modeToString(ipv.Mode)
 		if err != nil {
@@ -438,6 +488,22 @@ func validateCniContainerInterface(intf current.Interface, masterIndex int, mode
 			return fmt.Errorf("Interface %s Mac %s doesn't match container Mac: %s", intf.Name, intf.Mac, link.Attrs().HardwareAddr)
 		}
 	}
+
+	return nil
+}
+
+func cmdStatus(args *skel.CmdArgs) error {
+	conf := NetConf{}
+	if err := json.Unmarshal(args.StdinData, &conf); err != nil {
+		return fmt.Errorf("failed to load netconf: %w", err)
+	}
+	if conf.IPAM.Type != "" {
+		if err := ipam.ExecStatus(conf.IPAM.Type, args.StdinData); err != nil {
+			return err
+		}
+	}
+
+	// TODO: Check if master interface exists.
 
 	return nil
 }

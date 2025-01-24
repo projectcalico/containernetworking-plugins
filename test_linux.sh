@@ -10,12 +10,29 @@ set -e
 cd "$(dirname "$0")"
 
 # Build all plugins before testing
-source ./build_linux.sh
+. ./build_linux.sh
 
 echo "Running tests"
 
-function testrun {
-    sudo -E bash -c "umask 0; PATH=${GOPATH}/bin:$(pwd)/bin:${PATH} go test $@"
+testrun() {
+    sudo -E sh -c "umask 0; PATH=${GOPATH}/bin:$(pwd)/bin:${PATH} go test -race $*"
+}
+
+ensure_sysctl() {
+    local key
+    local val
+    local existing
+
+    key="$1"
+    val="$2"
+    existing="$(sysctl -ben "$key")"
+
+    sysctl -r 
+
+    if [ "$val" -ne "$existing" ]; then
+        echo "sudo sysctl -we '$key'='$val'"
+        sudo sysctl -we "$key"="$val"
+    fi
 }
 
 COVERALLS=${COVERALLS:-""}
@@ -31,27 +48,16 @@ PKG=${PKG:-$(go list ./... | xargs echo)}
 i=0
 for t in ${PKG}; do
     if [ -n "${COVERALLS}" ]; then
-        COVERFLAGS="-covermode set -coverprofile ${i}.coverprofile"
+        COVERFLAGS="-covermode atomic -coverprofile ${i}.coverprofile"
     fi
     echo "${t}"
     testrun "${COVERFLAGS:-""} ${t}"
     i=$((i+1))
 done
 
-echo "Checking gofmt..."
-fmtRes=$(go fmt $PKG)
-if [ -n "${fmtRes}" ]; then
-    echo -e "go fmt checking failed:\n${fmtRes}"
-    exit 255
-fi
-
-echo "Checking govet..."
-vetRes=$(go vet $PKG)
-if [ -n "${vetRes}" ]; then
-    echo -e "govet checking failed:\n${vetRes}"
-    exit 255
-fi
-
 # Run the pkg/ns tests as non root user
-mkdir /tmp/cni-rootless
+mkdir -p /tmp/cni-rootless
+ensure_sysctl kernel.unprivileged_userns_clone 1 
+ensure_sysctl kernel.apparmor_restrict_unprivileged_userns 0
+
 (export XDG_RUNTIME_DIR=/tmp/cni-rootless; cd pkg/ns/; unshare -rmn go test)

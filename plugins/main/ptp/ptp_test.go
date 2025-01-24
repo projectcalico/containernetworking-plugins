@@ -17,23 +17,21 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"strings"
 
-	"github.com/containernetworking/cni/pkg/skel"
-	"github.com/containernetworking/cni/pkg/types"
-	"github.com/containernetworking/cni/pkg/types/020"
-	"github.com/containernetworking/cni/pkg/types/040"
-	"github.com/containernetworking/cni/pkg/types/100"
-	"github.com/containernetworking/plugins/pkg/ns"
-	"github.com/containernetworking/plugins/pkg/testutils"
-
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 	"github.com/vishvananda/netlink"
 
+	"github.com/containernetworking/cni/pkg/skel"
+	"github.com/containernetworking/cni/pkg/types"
+	types020 "github.com/containernetworking/cni/pkg/types/020"
+	types040 "github.com/containernetworking/cni/pkg/types/040"
+	types100 "github.com/containernetworking/cni/pkg/types/100"
+	"github.com/containernetworking/plugins/pkg/ns"
+	"github.com/containernetworking/plugins/pkg/testutils"
 	"github.com/containernetworking/plugins/plugins/ipam/host-local/backend/allocator"
-	. "github.com/onsi/ginkgo"
-	. "github.com/onsi/gomega"
 )
 
 type Net struct {
@@ -41,6 +39,7 @@ type Net struct {
 	CNIVersion    string                 `json:"cniVersion"`
 	Type          string                 `json:"type,omitempty"`
 	IPMasq        bool                   `json:"ipMasq"`
+	IPMasqBackend *string                `json:"ipMasqBackend,omitempty"`
 	MTU           int                    `json:"mtu"`
 	IPAM          *allocator.IPAMConfig  `json:"ipam"`
 	DNS           types.DNS              `json:"dns"`
@@ -88,7 +87,6 @@ func buildOneConfig(netName string, cniVersion string, orig *Net, prevResult typ
 	}
 
 	return conf, nil
-
 }
 
 type tester interface {
@@ -98,14 +96,16 @@ type tester interface {
 
 type testerBase struct{}
 
-type testerV10x testerBase
-type testerV04x testerBase
-type testerV03x testerBase
-type testerV01xOr02x testerBase
+type (
+	testerV10x      testerBase
+	testerV04x      testerBase
+	testerV03x      testerBase
+	testerV01xOr02x testerBase
+)
 
 func newTesterByVersion(version string) tester {
 	switch {
-	case strings.HasPrefix(version, "1.0."):
+	case strings.HasPrefix(version, "1."):
 		return &testerV10x{}
 	case strings.HasPrefix(version, "0.4."):
 		return &testerV04x{}
@@ -187,7 +187,7 @@ func (t *testerV03x) verifyResult(result types.Result, expectedIfName, expectedS
 }
 
 // verifyResult minimally verifies the Result and returns the interface's IP addresses and MAC address
-func (t *testerV01xOr02x) verifyResult(result types.Result, expectedIfName, expectedSandbox string, expectedDNS types.DNS) ([]resultIP, string) {
+func (t *testerV01xOr02x) verifyResult(result types.Result, _, _ string, _ types.DNS) ([]resultIP, string) {
 	r, err := types020.GetResult(result)
 	Expect(err).NotTo(HaveOccurred())
 
@@ -221,7 +221,7 @@ var _ = Describe("ptp Operations", func() {
 		targetNS, err = testutils.NewNS()
 		Expect(err).NotTo(HaveOccurred())
 
-		dataDir, err = ioutil.TempDir("", "ptp_test")
+		dataDir, err = os.MkdirTemp("", "ptp_test")
 		Expect(err).NotTo(HaveOccurred())
 	})
 
@@ -250,6 +250,14 @@ var _ = Describe("ptp Operations", func() {
 			defer GinkgoRecover()
 
 			var err error
+			if testutils.SpecVersionHasSTATUS(cniVersion) {
+				By("Doing a cni STATUS")
+				err = testutils.CmdStatus(func() error {
+					return cmdStatus(args)
+				})
+				Expect(err).NotTo(HaveOccurred())
+			}
+
 			result, _, err = testutils.CmdAddWithArgs(args, func() error {
 				return cmdAdd(args)
 			})
@@ -260,7 +268,7 @@ var _ = Describe("ptp Operations", func() {
 
 		t := newTesterByVersion(cniVersion)
 		ips, mac := t.verifyResult(result, IFNAME, targetNS.Path(), expectedDNSConf)
-		Expect(len(ips)).To(Equal(numIPs))
+		Expect(ips).To(HaveLen(numIPs))
 
 		// Make sure ptp link exists in the target namespace
 		// Then, ping the gateway
@@ -369,7 +377,63 @@ var _ = Describe("ptp Operations", func() {
 			doTest(conf, ver, 1, dnsConf, targetNS)
 		})
 
-		It(fmt.Sprintf("[%s] configures and deconfigures a dual-stack ptp link with ADD/DEL", ver), func() {
+		It(fmt.Sprintf("[%s] configures and deconfigures a ptp link when specifying ipMasqBackend: iptables", ver), func() {
+			dnsConf := types.DNS{
+				Nameservers: []string{"10.1.2.123"},
+				Domain:      "some.domain.test",
+				Search:      []string{"search.test"},
+				Options:     []string{"option1:foo"},
+			}
+			dnsConfBytes, err := json.Marshal(dnsConf)
+			Expect(err).NotTo(HaveOccurred())
+
+			conf := fmt.Sprintf(`{
+			    "cniVersion": "%s",
+			    "name": "mynet",
+			    "type": "ptp",
+			    "ipMasq": true,
+			    "ipMasqBackend": "iptables",
+			    "mtu": 5000,
+			    "ipam": {
+				"type": "host-local",
+				"subnet": "10.1.2.0/24",
+				"dataDir": "%s"
+			    },
+			    "dns": %s
+			}`, ver, dataDir, string(dnsConfBytes))
+
+			doTest(conf, ver, 1, dnsConf, targetNS)
+		})
+
+		It(fmt.Sprintf("[%s] configures and deconfigures a ptp link when specifying ipMasqBackend: nftables", ver), func() {
+			dnsConf := types.DNS{
+				Nameservers: []string{"10.1.2.123"},
+				Domain:      "some.domain.test",
+				Search:      []string{"search.test"},
+				Options:     []string{"option1:foo"},
+			}
+			dnsConfBytes, err := json.Marshal(dnsConf)
+			Expect(err).NotTo(HaveOccurred())
+
+			conf := fmt.Sprintf(`{
+			    "cniVersion": "%s",
+			    "name": "mynet",
+			    "type": "ptp",
+			    "ipMasq": true,
+			    "ipMasqBackend": "nftables",
+			    "mtu": 5000,
+			    "ipam": {
+				"type": "host-local",
+				"subnet": "10.1.2.0/24",
+				"dataDir": "%s"
+			    },
+			    "dns": %s
+			}`, ver, dataDir, string(dnsConfBytes))
+
+			doTest(conf, ver, 1, dnsConf, targetNS)
+		})
+
+		It(fmt.Sprintf("[%s] configures and deconfigures a dual-stack ptp link + routes with ADD/DEL", ver), func() {
 			conf := fmt.Sprintf(`{
 			    "cniVersion": "%s",
 			    "name": "mynet",
@@ -381,6 +445,11 @@ var _ = Describe("ptp Operations", func() {
 				"ranges": [
 					[{ "subnet": "10.1.2.0/24"}],
 					[{ "subnet": "2001:db8:1::0/66"}]
+				],
+				"routes": [
+				  { "dst": "0.0.0.0/0" },
+				  { "dst": "192.168.0.0/16" },
+				  { "dst": "1.2.3.4/32" }
 				],
 				"dataDir": "%s"
 			    }
