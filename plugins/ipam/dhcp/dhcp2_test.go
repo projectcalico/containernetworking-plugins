@@ -16,19 +16,21 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"sync"
 	"time"
 
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
-	"github.com/vishvananda/netlink"
-
 	"github.com/containernetworking/cni/pkg/skel"
 	current "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/containernetworking/plugins/pkg/testutils"
+
+	"github.com/vishvananda/netlink"
+
+	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/gomega"
 )
 
 var _ = Describe("DHCP Multiple Lease Operations", func() {
@@ -38,10 +40,11 @@ var _ = Describe("DHCP Multiple Lease Operations", func() {
 	var clientCmd *exec.Cmd
 	var socketPath string
 	var tmpDir string
+	var serverIP net.IPNet
 	var err error
 
 	BeforeEach(func() {
-		dhcpServerStopCh, socketPath, originalNS, targetNS, err = dhcpSetupOriginalNS()
+		dhcpServerStopCh, serverIP, socketPath, originalNS, targetNS, err = dhcpSetupOriginalNS()
 		Expect(err).NotTo(HaveOccurred())
 
 		// Move the container side to the container's NS
@@ -61,12 +64,13 @@ var _ = Describe("DHCP Multiple Lease Operations", func() {
 		})
 
 		// Start the DHCP server
-		dhcpServerDone = dhcpServerStart(originalNS, 2, dhcpServerStopCh)
+		dhcpServerDone, err = dhcpServerStart(originalNS, net.IPv4(192, 168, 1, 5), serverIP.IP, 2, dhcpServerStopCh)
+		Expect(err).NotTo(HaveOccurred())
 
 		// Start the DHCP client daemon
 		dhcpPluginPath, err := exec.LookPath("dhcp")
 		Expect(err).NotTo(HaveOccurred())
-		clientCmd = exec.Command(dhcpPluginPath, "daemon", "-socketpath", socketPath, "--timeout", "2s", "--resendtimeout", "8s")
+		clientCmd = exec.Command(dhcpPluginPath, "daemon", "-socketpath", socketPath)
 		err = clientCmd.Start()
 		Expect(err).NotTo(HaveOccurred())
 		Expect(clientCmd.Process).NotTo(BeNil())
@@ -119,7 +123,7 @@ var _ = Describe("DHCP Multiple Lease Operations", func() {
 
 			addResult, err = current.GetResult(r)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(addResult.IPs).To(HaveLen(1))
+			Expect(len(addResult.IPs)).To(Equal(1))
 			Expect(addResult.IPs[0].Address.String()).To(Equal("192.168.1.5/24"))
 			return nil
 		})
@@ -142,7 +146,7 @@ var _ = Describe("DHCP Multiple Lease Operations", func() {
 
 			addResult, err = current.GetResult(r)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(addResult.IPs).To(HaveLen(1))
+			Expect(len(addResult.IPs)).To(Equal(1))
 			Expect(addResult.IPs[0].Address.String()).To(Equal("192.168.1.6/24"))
 			return nil
 		})

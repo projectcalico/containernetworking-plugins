@@ -19,11 +19,11 @@ import (
 	"net"
 	"os"
 
-	"github.com/vishvananda/netlink"
-
 	current "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/plugins/pkg/ip"
 	"github.com/containernetworking/plugins/pkg/utils/sysctl"
+
+	"github.com/vishvananda/netlink"
 )
 
 const (
@@ -43,8 +43,12 @@ func ConfigureIface(ifName string, res *current.Result) error {
 		return fmt.Errorf("failed to lookup %q: %v", ifName, err)
 	}
 
+	if err := netlink.LinkSetUp(link); err != nil {
+		return fmt.Errorf("failed to set %q UP: %v", ifName, err)
+	}
+
 	var v4gw, v6gw net.IP
-	hasEnabledIpv6 := false
+	var has_enabled_ipv6 bool = false
 	for _, ipc := range res.IPs {
 		if ipc.Interface == nil {
 			continue
@@ -57,7 +61,7 @@ func ConfigureIface(ifName string, res *current.Result) error {
 
 		// Make sure sysctl "disable_ipv6" is 0 if we are about to add
 		// an IPv6 address to the interface
-		if !hasEnabledIpv6 && ipc.Address.IP.To4() == nil {
+		if !has_enabled_ipv6 && ipc.Address.IP.To4() == nil {
 			// Enabled IPv6 for loopback "lo" and the interface
 			// being configured
 			for _, iface := range [2]string{"lo", ifName} {
@@ -79,7 +83,7 @@ func ConfigureIface(ifName string, res *current.Result) error {
 					return fmt.Errorf("failed to enable IPv6 for interface %q (%s=%s): %v", iface, ipv6SysctlValueName, value, err)
 				}
 			}
-			hasEnabledIpv6 = true
+			has_enabled_ipv6 = true
 		}
 
 		addr := &netlink.Addr{IPNet: &ipc.Address, Label: ""}
@@ -93,10 +97,6 @@ func ConfigureIface(ifName string, res *current.Result) error {
 		} else if !gwIsV4 && v6gw == nil {
 			v6gw = ipc.Gateway
 		}
-	}
-
-	if err := netlink.LinkSetUp(link); err != nil {
-		return fmt.Errorf("failed to set %q UP: %v", ifName, err)
 	}
 
 	if v6gw != nil {
@@ -117,27 +117,10 @@ func ConfigureIface(ifName string, res *current.Result) error {
 			Dst:       &r.Dst,
 			LinkIndex: link.Attrs().Index,
 			Gw:        gw,
-			Priority:  r.Priority,
-		}
-
-		if r.Table != nil {
-			route.Table = *r.Table
-		}
-
-		if r.Scope != nil {
-			route.Scope = netlink.Scope(*r.Scope)
-		}
-
-		if r.Table != nil {
-			route.Table = *r.Table
-		}
-
-		if r.Scope != nil {
-			route.Scope = netlink.Scope(*r.Scope)
 		}
 
 		if err = netlink.RouteAddEcmp(&route); err != nil {
-			return fmt.Errorf("failed to add route '%v via %v dev %v metric %d (Scope: %v, Table: %d)': %v", r.Dst, gw, ifName, r.Priority, route.Scope, route.Table, err)
+			return fmt.Errorf("failed to add route '%v via %v dev %v': %v", r.Dst, gw, ifName, err)
 		}
 	}
 

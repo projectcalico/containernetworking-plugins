@@ -15,10 +15,9 @@
 package disk
 
 import (
+	"github.com/alexflint/go-filemutex"
 	"os"
 	"path"
-
-	"github.com/alexflint/go-filemutex"
 )
 
 // FileLock wraps os.File to be used as a lock using flock

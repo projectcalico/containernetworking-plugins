@@ -1,5 +1,3 @@
-//go:build windows
-
 package hcn
 
 import (
@@ -11,7 +9,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// IpConfig is associated with an endpoint
+// IpConfig is assoicated with an endpoint
 type IpConfig struct {
 	IpAddress    string `json:",omitempty"`
 	PrefixLength uint8  `json:",omitempty"`
@@ -72,14 +70,14 @@ type PolicyEndpointRequest struct {
 	Policies []EndpointPolicy `json:",omitempty"`
 }
 
-func getEndpoint(endpointGUID guid.GUID, query string) (*HostComputeEndpoint, error) {
+func getEndpoint(endpointGuid guid.GUID, query string) (*HostComputeEndpoint, error) {
 	// Open endpoint.
 	var (
 		endpointHandle   hcnEndpoint
 		resultBuffer     *uint16
 		propertiesBuffer *uint16
 	)
-	hr := hcnOpenEndpoint(&endpointGUID, &endpointHandle, &resultBuffer)
+	hr := hcnOpenEndpoint(&endpointGuid, &endpointHandle, &resultBuffer)
 	if err := checkForErrors("hcnOpenEndpoint", hr, resultBuffer); err != nil {
 		return nil, err
 	}
@@ -121,8 +119,8 @@ func enumerateEndpoints(query string) ([]HostComputeEndpoint, error) {
 	}
 
 	var outputEndpoints []HostComputeEndpoint
-	for _, endpointGUID := range endpointIds {
-		endpoint, err := getEndpoint(endpointGUID, query)
+	for _, endpointGuid := range endpointIds {
+		endpoint, err := getEndpoint(endpointGuid, query)
 		if err != nil {
 			return nil, err
 		}
@@ -131,22 +129,22 @@ func enumerateEndpoints(query string) ([]HostComputeEndpoint, error) {
 	return outputEndpoints, nil
 }
 
-func createEndpoint(networkID string, endpointSettings string) (*HostComputeEndpoint, error) {
-	networkGUID, err := guid.FromString(networkID)
+func createEndpoint(networkId string, endpointSettings string) (*HostComputeEndpoint, error) {
+	networkGuid, err := guid.FromString(networkId)
 	if err != nil {
 		return nil, errInvalidNetworkID
 	}
 	// Open network.
 	var networkHandle hcnNetwork
 	var resultBuffer *uint16
-	hr := hcnOpenNetwork(&networkGUID, &networkHandle, &resultBuffer)
+	hr := hcnOpenNetwork(&networkGuid, &networkHandle, &resultBuffer)
 	if err := checkForErrors("hcnOpenNetwork", hr, resultBuffer); err != nil {
 		return nil, err
 	}
 	// Create endpoint.
-	endpointID := guid.GUID{}
+	endpointId := guid.GUID{}
 	var endpointHandle hcnEndpoint
-	hr = hcnCreateEndpoint(networkHandle, &endpointID, endpointSettings, &endpointHandle, &resultBuffer)
+	hr = hcnCreateEndpoint(networkHandle, &endpointId, endpointSettings, &endpointHandle, &resultBuffer)
 	if err := checkForErrors("hcnCreateEndpoint", hr, resultBuffer); err != nil {
 		return nil, err
 	}
@@ -180,8 +178,8 @@ func createEndpoint(networkID string, endpointSettings string) (*HostComputeEndp
 	return &outputEndpoint, nil
 }
 
-func modifyEndpoint(endpointID string, settings string) (*HostComputeEndpoint, error) {
-	endpointGUID, err := guid.FromString(endpointID)
+func modifyEndpoint(endpointId string, settings string) (*HostComputeEndpoint, error) {
+	endpointGuid, err := guid.FromString(endpointId)
 	if err != nil {
 		return nil, errInvalidEndpointID
 	}
@@ -191,7 +189,7 @@ func modifyEndpoint(endpointID string, settings string) (*HostComputeEndpoint, e
 		resultBuffer     *uint16
 		propertiesBuffer *uint16
 	)
-	hr := hcnOpenEndpoint(&endpointGUID, &endpointHandle, &resultBuffer)
+	hr := hcnOpenEndpoint(&endpointGuid, &endpointHandle, &resultBuffer)
 	if err := checkForErrors("hcnOpenEndpoint", hr, resultBuffer); err != nil {
 		return nil, err
 	}
@@ -224,13 +222,13 @@ func modifyEndpoint(endpointID string, settings string) (*HostComputeEndpoint, e
 	return &outputEndpoint, nil
 }
 
-func deleteEndpoint(endpointID string) error {
-	endpointGUID, err := guid.FromString(endpointID)
+func deleteEndpoint(endpointId string) error {
+	endpointGuid, err := guid.FromString(endpointId)
 	if err != nil {
 		return errInvalidEndpointID
 	}
 	var resultBuffer *uint16
-	hr := hcnDeleteEndpoint(&endpointGUID, &resultBuffer)
+	hr := hcnDeleteEndpoint(&endpointGuid, &resultBuffer)
 	if err := checkForErrors("hcnDeleteEndpoint", hr, resultBuffer); err != nil {
 		return err
 	}
@@ -249,12 +247,12 @@ func ListEndpoints() ([]HostComputeEndpoint, error) {
 
 // ListEndpointsQuery makes a call to query the list of available endpoints.
 func ListEndpointsQuery(query HostComputeQuery) ([]HostComputeEndpoint, error) {
-	queryJSON, err := json.Marshal(query)
+	queryJson, err := json.Marshal(query)
 	if err != nil {
 		return nil, err
 	}
 
-	endpoints, err := enumerateEndpoints(string(queryJSON))
+	endpoints, err := enumerateEndpoints(string(queryJson))
 	if err != nil {
 		return nil, err
 	}
@@ -262,10 +260,10 @@ func ListEndpointsQuery(query HostComputeQuery) ([]HostComputeEndpoint, error) {
 }
 
 // ListEndpointsOfNetwork queries the list of endpoints on a network.
-func ListEndpointsOfNetwork(networkID string) ([]HostComputeEndpoint, error) {
+func ListEndpointsOfNetwork(networkId string) ([]HostComputeEndpoint, error) {
 	hcnQuery := defaultQuery()
 	// TODO: Once query can convert schema, change to {HostComputeNetwork:networkId}
-	mapA := map[string]string{"VirtualNetwork": networkID}
+	mapA := map[string]string{"VirtualNetwork": networkId}
 	filter, err := json.Marshal(mapA)
 	if err != nil {
 		return nil, err
@@ -276,9 +274,9 @@ func ListEndpointsOfNetwork(networkID string) ([]HostComputeEndpoint, error) {
 }
 
 // GetEndpointByID returns an endpoint specified by Id
-func GetEndpointByID(endpointID string) (*HostComputeEndpoint, error) {
+func GetEndpointByID(endpointId string) (*HostComputeEndpoint, error) {
 	hcnQuery := defaultQuery()
-	mapA := map[string]string{"ID": endpointID}
+	mapA := map[string]string{"ID": endpointId}
 	filter, err := json.Marshal(mapA)
 	if err != nil {
 		return nil, err
@@ -290,7 +288,7 @@ func GetEndpointByID(endpointID string) (*HostComputeEndpoint, error) {
 		return nil, err
 	}
 	if len(endpoints) == 0 {
-		return nil, EndpointNotFoundError{EndpointID: endpointID}
+		return nil, EndpointNotFoundError{EndpointID: endpointId}
 	}
 	return &endpoints[0], err
 }
@@ -347,15 +345,15 @@ func (endpoint *HostComputeEndpoint) Delete() error {
 }
 
 // ModifyEndpointSettings updates the Port/Policy of an Endpoint.
-func ModifyEndpointSettings(endpointID string, request *ModifyEndpointSettingRequest) error {
-	logrus.Debugf("hcn::HostComputeEndpoint::ModifyEndpointSettings id=%s", endpointID)
+func ModifyEndpointSettings(endpointId string, request *ModifyEndpointSettingRequest) error {
+	logrus.Debugf("hcn::HostComputeEndpoint::ModifyEndpointSettings id=%s", endpointId)
 
 	endpointSettingsRequest, err := json.Marshal(request)
 	if err != nil {
 		return err
 	}
 
-	_, err = modifyEndpoint(endpointID, string(endpointSettingsRequest))
+	_, err = modifyEndpoint(endpointId, string(endpointSettingsRequest))
 	if err != nil {
 		return err
 	}
@@ -366,25 +364,25 @@ func ModifyEndpointSettings(endpointID string, request *ModifyEndpointSettingReq
 func (endpoint *HostComputeEndpoint) ApplyPolicy(requestType RequestType, endpointPolicy PolicyEndpointRequest) error {
 	logrus.Debugf("hcn::HostComputeEndpoint::ApplyPolicy id=%s", endpoint.Id)
 
-	settingsJSON, err := json.Marshal(endpointPolicy)
+	settingsJson, err := json.Marshal(endpointPolicy)
 	if err != nil {
 		return err
 	}
 	requestMessage := &ModifyEndpointSettingRequest{
 		ResourceType: EndpointResourceTypePolicy,
 		RequestType:  requestType,
-		Settings:     settingsJSON,
+		Settings:     settingsJson,
 	}
 
 	return ModifyEndpointSettings(endpoint.Id, requestMessage)
 }
 
 // NamespaceAttach modifies a Namespace to add an endpoint.
-func (endpoint *HostComputeEndpoint) NamespaceAttach(namespaceID string) error {
-	return AddNamespaceEndpoint(namespaceID, endpoint.Id)
+func (endpoint *HostComputeEndpoint) NamespaceAttach(namespaceId string) error {
+	return AddNamespaceEndpoint(namespaceId, endpoint.Id)
 }
 
 // NamespaceDetach modifies a Namespace to remove an endpoint.
-func (endpoint *HostComputeEndpoint) NamespaceDetach(namespaceID string) error {
-	return RemoveNamespaceEndpoint(namespaceID, endpoint.Id)
+func (endpoint *HostComputeEndpoint) NamespaceDetach(namespaceId string) error {
+	return RemoveNamespaceEndpoint(namespaceId, endpoint.Id)
 }

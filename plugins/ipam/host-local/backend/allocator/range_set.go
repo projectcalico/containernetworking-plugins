@@ -67,8 +67,10 @@ func (s *RangeSet) Canonicalize() error {
 		}
 		if i == 0 {
 			fam = len((*s)[i].RangeStart)
-		} else if fam != len((*s)[i].RangeStart) {
-			return fmt.Errorf("mixed address families")
+		} else {
+			if fam != len((*s)[i].RangeStart) {
+				return fmt.Errorf("mixed address families")
+			}
 		}
 	}
 

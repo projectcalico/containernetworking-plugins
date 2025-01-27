@@ -19,24 +19,22 @@ import (
 	"net"
 	"syscall"
 
-	"github.com/vishvananda/netlink"
-
 	"github.com/containernetworking/plugins/pkg/ip"
+
+	"github.com/vishvananda/netlink"
 )
 
 const latencyInMillis = 25
 
 func CreateIfb(ifbDeviceName string, mtu int) error {
-	// do not set TxQLen > 0 nor TxQLen == -1 until issues have been fixed with numrxqueues / numtxqueues across interfaces
-	// which needs to get set on IFB devices via upstream library: see hint https://github.com/containernetworking/plugins/pull/1097
 	err := netlink.LinkAdd(&netlink.Ifb{
 		LinkAttrs: netlink.LinkAttrs{
-			Name:   ifbDeviceName,
-			Flags:  net.FlagUp,
-			MTU:    mtu,
-			TxQLen: 0,
+			Name:  ifbDeviceName,
+			Flags: net.FlagUp,
+			MTU:   mtu,
 		},
 	})
+
 	if err != nil {
 		return fmt.Errorf("adding link: %s", err)
 	}
@@ -128,9 +126,9 @@ func createTBF(rateInBits, burstInBits uint64, linkIndex int) error {
 	}
 	rateInBytes := rateInBits / 8
 	burstInBytes := burstInBits / 8
-	bufferInBytes := buffer(rateInBytes, uint32(burstInBytes))
+	bufferInBytes := buffer(uint64(rateInBytes), uint32(burstInBytes))
 	latency := latencyInUsec(latencyInMillis)
-	limitInBytes := limit(rateInBytes, latency, uint32(burstInBytes))
+	limitInBytes := limit(uint64(rateInBytes), latency, uint32(burstInBytes))
 
 	qdisc := &netlink.Tbf{
 		QdiscAttrs: netlink.QdiscAttrs{
@@ -138,9 +136,9 @@ func createTBF(rateInBits, burstInBits uint64, linkIndex int) error {
 			Handle:    netlink.MakeHandle(1, 0),
 			Parent:    netlink.HANDLE_ROOT,
 		},
-		Limit:  limitInBytes,
-		Rate:   rateInBytes,
-		Buffer: bufferInBytes,
+		Limit:  uint32(limitInBytes),
+		Rate:   uint64(rateInBytes),
+		Buffer: uint32(bufferInBytes),
 	}
 	err := netlink.QdiscAdd(qdisc)
 	if err != nil {
@@ -149,8 +147,12 @@ func createTBF(rateInBits, burstInBits uint64, linkIndex int) error {
 	return nil
 }
 
+func tick2Time(tick uint32) uint32 {
+	return uint32(float64(tick) / float64(netlink.TickInUsec()))
+}
+
 func time2Tick(time uint32) uint32 {
-	return uint32(float64(time) * netlink.TickInUsec())
+	return uint32(float64(time) * float64(netlink.TickInUsec()))
 }
 
 func buffer(rate uint64, burst uint32) uint32 {

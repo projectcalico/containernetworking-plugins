@@ -44,7 +44,7 @@ func (lm lruMap) len() int {
 }
 
 func (lm lruMap) keys() []interface{} {
-	keys := make([]interface{}, 0, len(lm.cacheKeys))
+	keys := []interface{}{}
 	for k := range lm.cacheKeys {
 		keys = append(keys, k)
 	}

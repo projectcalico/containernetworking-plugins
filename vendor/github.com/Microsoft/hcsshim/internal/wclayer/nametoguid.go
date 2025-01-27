@@ -1,5 +1,3 @@
-//go:build windows
-
 package wclayer
 
 import (
@@ -16,15 +14,15 @@ import (
 // across all clients.
 func NameToGuid(ctx context.Context, name string) (_ guid.GUID, err error) {
 	title := "hcsshim::NameToGuid"
-	ctx, span := oc.StartSpan(ctx, title) //nolint:ineffassign,staticcheck
+	ctx, span := trace.StartSpan(ctx, title) //nolint:ineffassign,staticcheck
 	defer span.End()
 	defer func() { oc.SetSpanStatus(span, err) }()
-	span.AddAttributes(trace.StringAttribute("objectName", name))
+	span.AddAttributes(trace.StringAttribute("name", name))
 
 	var id guid.GUID
 	err = nameToGuid(name, &id)
 	if err != nil {
-		return guid.GUID{}, hcserror.New(err, title, "")
+		return guid.GUID{}, hcserror.New(err, title+" - failed", "")
 	}
 	span.AddAttributes(trace.StringAttribute("guid", id.String()))
 	return id, nil

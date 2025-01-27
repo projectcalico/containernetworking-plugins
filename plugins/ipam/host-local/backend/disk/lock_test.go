@@ -15,22 +15,23 @@
 package disk
 
 import (
+	"io/ioutil"
 	"os"
 	"path/filepath"
 
-	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 )
 
 var _ = Describe("Lock Operations", func() {
 	It("locks a file path", func() {
-		dir, err := os.MkdirTemp("", "")
+		dir, err := ioutil.TempDir("", "")
 		Expect(err).ToNot(HaveOccurred())
 		defer os.RemoveAll(dir)
 
 		// create a dummy file to lock
 		path := filepath.Join(dir, "x")
-		f, err := os.OpenFile(path, os.O_RDONLY|os.O_CREATE, 0o666)
+		f, err := os.OpenFile(path, os.O_RDONLY|os.O_CREATE, 0666)
 		Expect(err).ToNot(HaveOccurred())
 		err = f.Close()
 		Expect(err).ToNot(HaveOccurred())
@@ -46,7 +47,7 @@ var _ = Describe("Lock Operations", func() {
 	})
 
 	It("locks a folder path", func() {
-		dir, err := os.MkdirTemp("", "")
+		dir, err := ioutil.TempDir("", "")
 		Expect(err).ToNot(HaveOccurred())
 		defer os.RemoveAll(dir)
 

@@ -18,10 +18,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/containernetworking/plugins/pkg/utils"
 	"github.com/coreos/go-iptables/iptables"
 	"github.com/mattn/go-shellwords"
-
-	"github.com/containernetworking/plugins/pkg/utils"
 )
 
 type chain struct {
@@ -37,6 +36,7 @@ type chain struct {
 
 // setup idempotently creates the chain. It will not error if the chain exists.
 func (c *chain) setup(ipt *iptables.IPTables) error {
+
 	err := utils.EnsureChain(ipt, c.table, c.name)
 	if err != nil {
 		return err
@@ -44,7 +44,7 @@ func (c *chain) setup(ipt *iptables.IPTables) error {
 
 	// Add the rules to the chain
 	for _, rule := range c.rules {
-		if err := utils.InsertUnique(ipt, c.table, c.name, false, rule); err != nil {
+		if err := insertUnique(ipt, c.table, c.name, false, rule); err != nil {
 			return err
 		}
 	}
@@ -55,7 +55,7 @@ func (c *chain) setup(ipt *iptables.IPTables) error {
 			r := []string{}
 			r = append(r, rule...)
 			r = append(r, "-j", c.name)
-			if err := utils.InsertUnique(ipt, c.table, entryChain, c.prependEntry, r); err != nil {
+			if err := insertUnique(ipt, c.table, entryChain, c.prependEntry, r); err != nil {
 				return err
 			}
 		}
@@ -67,27 +67,13 @@ func (c *chain) setup(ipt *iptables.IPTables) error {
 // teardown idempotently deletes a chain. It will not error if the chain doesn't exist.
 // It will first delete all references to this chain in the entryChains.
 func (c *chain) teardown(ipt *iptables.IPTables) error {
-	// nothing to do if the custom chain doesn't exist to begin with
-	exists, err := ipt.ChainExists(c.table, c.name)
-	if err == nil && !exists {
-		return nil
-	}
-	// delete references created by setup()
-	for _, entryChain := range c.entryChains {
-		for _, rule := range c.entryRules {
-			r := []string{}
-			r = append(r, rule...)
-			r = append(r, "-j", c.name)
-
-			ipt.Delete(c.table, entryChain, r...)
-		}
-	}
-	// if chain deletion succeeds now, all references are gone
-	if err := ipt.ClearAndDeleteChain(c.table, c.name); err == nil {
-		return nil
+	// flush the chain
+	// This will succeed *and create the chain* if it does not exist.
+	// If the chain doesn't exist, the next checks will fail.
+	if err := utils.ClearChain(ipt, c.table, c.name); err != nil {
+		return err
 	}
 
-	// find references the hard way
 	for _, entryChain := range c.entryChains {
 		entryChainRules, err := ipt.List(c.table, entryChain)
 		if err != nil || len(entryChainRules) < 1 {
@@ -112,12 +98,31 @@ func (c *chain) teardown(ipt *iptables.IPTables) error {
 		}
 	}
 
-	return ipt.ClearAndDeleteChain(c.table, c.name)
+	return utils.DeleteChain(ipt, c.table, c.name)
+}
+
+// insertUnique will add a rule to a chain if it does not already exist.
+// By default the rule is appended, unless prepend is true.
+func insertUnique(ipt *iptables.IPTables, table, chain string, prepend bool, rule []string) error {
+	exists, err := ipt.Exists(table, chain, rule...)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+
+	if prepend {
+		return ipt.Insert(table, chain, 1, rule...)
+	} else {
+		return ipt.Append(table, chain, rule...)
+	}
 }
 
 // check the chain.
 func (c *chain) check(ipt *iptables.IPTables) error {
-	exists, err := ipt.ChainExists(c.table, c.name)
+
+	exists, err := utils.ChainExists(ipt, c.table, c.name)
 	if err != nil {
 		return err
 	}

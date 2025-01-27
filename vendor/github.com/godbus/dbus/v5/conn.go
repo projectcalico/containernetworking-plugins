@@ -73,7 +73,7 @@ func SessionBus() (conn *Conn, err error) {
 	return
 }
 
-func getSessionBusAddress(autolaunch bool) (string, error) {
+func getSessionBusAddress() (string, error) {
 	if address := os.Getenv("DBUS_SESSION_BUS_ADDRESS"); address != "" && address != "autolaunch:" {
 		return address, nil
 
@@ -81,26 +81,12 @@ func getSessionBusAddress(autolaunch bool) (string, error) {
 		os.Setenv("DBUS_SESSION_BUS_ADDRESS", address)
 		return address, nil
 	}
-	if !autolaunch {
-		return "", errors.New("dbus: couldn't determine address of session bus")
-	}
 	return getSessionBusPlatformAddress()
 }
 
 // SessionBusPrivate returns a new private connection to the session bus.
 func SessionBusPrivate(opts ...ConnOption) (*Conn, error) {
-	address, err := getSessionBusAddress(true)
-	if err != nil {
-		return nil, err
-	}
-
-	return Dial(address, opts...)
-}
-
-// SessionBusPrivate returns a new private connection to the session bus.  If
-// the session bus is not already open, do not attempt to launch it.
-func SessionBusPrivateNoAutoStartup(opts ...ConnOption) (*Conn, error) {
-	address, err := getSessionBusAddress(false)
+	address, err := getSessionBusAddress()
 	if err != nil {
 		return nil, err
 	}
@@ -135,7 +121,7 @@ func SystemBus() (conn *Conn, err error) {
 
 // ConnectSessionBus connects to the session bus.
 func ConnectSessionBus(opts ...ConnOption) (*Conn, error) {
-	address, err := getSessionBusAddress(true)
+	address, err := getSessionBusAddress()
 	if err != nil {
 		return nil, err
 	}
@@ -169,7 +155,7 @@ func Connect(address string, opts ...ConnOption) (*Conn, error) {
 
 // SystemBusPrivate returns a new private connection to the system bus.
 // Note: this connection is not ready to use. One must perform Auth and Hello
-// on the connection before it is usable.
+// on the connection before it is useable.
 func SystemBusPrivate(opts ...ConnOption) (*Conn, error) {
 	return Dial(getSystemBusPlatformAddress(), opts...)
 }
@@ -194,7 +180,7 @@ func Dial(address string, opts ...ConnOption) (*Conn, error) {
 //
 // Deprecated: use Dial with options instead.
 func DialHandler(address string, handler Handler, signalHandler SignalHandler) (*Conn, error) {
-	return Dial(address, WithHandler(handler), WithSignalHandler(signalHandler))
+	return Dial(address, WithSignalHandler(signalHandler))
 }
 
 // ConnOption is a connection option.
@@ -284,6 +270,10 @@ func newConn(tr transport, opts ...ConnOption) (*Conn, error) {
 		conn.ctx = context.Background()
 	}
 	conn.ctx, conn.cancelCtx = context.WithCancel(conn.ctx)
+	go func() {
+		<-conn.ctx.Done()
+		conn.Close()
+	}()
 
 	conn.calls = newCallTracker()
 	if conn.handler == nil {
@@ -298,11 +288,6 @@ func newConn(tr transport, opts ...ConnOption) (*Conn, error) {
 	conn.outHandler = &outputHandler{conn: conn}
 	conn.names = newNameTracker()
 	conn.busObj = conn.Object("org.freedesktop.DBus", "/org/freedesktop/DBus")
-
-	go func() {
-		<-conn.ctx.Done()
-		conn.Close()
-	}()
 	return conn, nil
 }
 
@@ -493,22 +478,12 @@ func (conn *Conn) sendMessageAndIfClosed(msg *Message, ifClosed func()) {
 		conn.outInt(msg)
 	}
 	err := conn.outHandler.sendAndIfClosed(msg, ifClosed)
+	conn.calls.handleSendError(msg, err)
 	if err != nil {
-		conn.handleSendError(msg, err)
+		conn.serialGen.RetireSerial(msg.serial)
 	} else if msg.Type != TypeMethodCall {
 		conn.serialGen.RetireSerial(msg.serial)
 	}
-}
-
-func (conn *Conn) handleSendError(msg *Message, err error) {
-	if msg.Type == TypeMethodCall {
-		conn.calls.handleSendError(msg, err)
-	} else if msg.Type == TypeMethodReply {
-		if _, ok := err.(FormatError); ok {
-			conn.sendError(err, msg.Headers[FieldDestination].value.(string), msg.Headers[FieldReplySerial].value.(uint32))
-		}
-	}
-	conn.serialGen.RetireSerial(msg.serial)
 }
 
 // Send sends the given message to the message bus. You usually don't need to
@@ -551,11 +526,6 @@ func (conn *Conn) send(ctx context.Context, msg *Message, ch chan *Call) *Call {
 		call.ctx = ctx
 		call.ctxCanceler = canceler
 		conn.calls.track(msg.serial, call)
-		if ctx.Err() != nil {
-			// short path: don't even send the message if context already cancelled
-			conn.calls.handleSendError(msg, ctx.Err())
-			return call
-		}
 		go func() {
 			<-ctx.Done()
 			conn.calls.handleSendError(msg, ctx.Err())
@@ -655,9 +625,7 @@ func (conn *Conn) RemoveMatchSignalContext(ctx context.Context, options ...Match
 
 // Signal registers the given channel to be passed all received signal messages.
 //
-// Multiple of these channels can be registered at the same time. The channel is
-// closed if the Conn is closed; it should not be closed by the caller before
-// RemoveSignal was called on it.
+// Multiple of these channels can be registered at the same time.
 //
 // These channels are "overwritten" by Eavesdrop; i.e., if there currently is a
 // channel for eavesdropped messages, this channel receives all signals, and
@@ -773,12 +741,7 @@ func getKey(s, key string) string {
 	for _, keyEqualsValue := range strings.Split(s, ",") {
 		keyValue := strings.SplitN(keyEqualsValue, "=", 2)
 		if len(keyValue) == 2 && keyValue[0] == key {
-			val, err := UnescapeBusAddressValue(keyValue[1])
-			if err != nil {
-				// No way to return an error.
-				return ""
-			}
-			return val
+			return keyValue[1]
 		}
 	}
 	return ""

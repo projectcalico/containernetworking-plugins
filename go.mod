@@ -1,56 +1,41 @@
 module github.com/containernetworking/plugins
 
-go 1.23
+go 1.22
 
 require (
-	github.com/Microsoft/hcsshim v0.12.9
-	github.com/alexflint/go-filemutex v1.3.0
+	github.com/Microsoft/hcsshim v0.8.20
+	github.com/alexflint/go-filemutex v1.1.0
 	github.com/buger/jsonparser v1.1.1
-	github.com/containernetworking/cni v1.2.3
-	github.com/coreos/go-iptables v0.8.0
-	github.com/coreos/go-systemd/v22 v22.5.0
+	github.com/containernetworking/cni v1.0.1
+	github.com/coreos/go-iptables v0.6.0
+	github.com/coreos/go-systemd/v22 v22.3.2
 	github.com/d2g/dhcp4 v0.0.0-20170904100407-a1d1b6c41b1c
 	github.com/d2g/dhcp4client v1.0.0
-	github.com/godbus/dbus/v5 v5.1.0
-	github.com/insomniacslk/dhcp v0.0.0-20240829085014-a3a4c1f04475
+	github.com/d2g/dhcp4server v0.0.0-20181031114812-7d4a0a7f59a5
+	github.com/godbus/dbus/v5 v5.0.4
+	github.com/j-keck/arping v1.0.2
 	github.com/mattn/go-shellwords v1.0.12
-	github.com/networkplumbing/go-nft v0.4.0
-	github.com/onsi/ginkgo/v2 v2.22.2
-	github.com/onsi/gomega v1.36.2
-	github.com/opencontainers/selinux v1.11.1
-	github.com/safchain/ethtool v0.5.9
-	github.com/vishvananda/netlink v1.3.0
-	golang.org/x/sys v0.28.0
-	sigs.k8s.io/knftables v0.0.18
+	github.com/networkplumbing/go-nft v0.2.0
+	github.com/onsi/ginkgo v1.16.4
+	github.com/onsi/gomega v1.15.0
+	github.com/safchain/ethtool v0.0.0-20210803160452-9aa261dae9b1
+	github.com/vishvananda/netlink v1.1.1-0.20210330154013-f5de75959ad5
+	golang.org/x/sys v0.21.0
 )
 
 require (
-	github.com/Microsoft/go-winio v0.6.2 // indirect
-	github.com/containerd/cgroups/v3 v3.0.3 // indirect
-	github.com/containerd/errdefs v0.3.0 // indirect
-	github.com/containerd/errdefs/pkg v0.3.0 // indirect
-	github.com/containerd/typeurl/v2 v2.2.0 // indirect
-	github.com/go-logr/logr v1.4.2 // indirect
-	github.com/go-task/slim-sprig/v3 v3.0.0 // indirect
+	github.com/Microsoft/go-winio v0.4.17 // indirect
+	github.com/containerd/cgroups v1.0.1 // indirect
+	github.com/fsnotify/fsnotify v1.4.9 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
-	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
-	github.com/google/go-cmp v0.6.0 // indirect
-	github.com/google/pprof v0.0.0-20241210010833-40e02aabc2ad // indirect
-	github.com/josharian/native v1.1.0 // indirect
-	github.com/mdlayher/packet v1.1.2 // indirect
-	github.com/mdlayher/socket v0.5.1 // indirect
-	github.com/pierrec/lz4/v4 v4.1.21 // indirect
+	github.com/golang/groupcache v0.0.0-20200121045136-8c9f03a8e57e // indirect
+	github.com/nxadm/tail v1.4.8 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
-	github.com/sirupsen/logrus v1.9.3 // indirect
-	github.com/u-root/uio v0.0.0-20240224005618-d2acac8f3701 // indirect
-	github.com/vishvananda/netns v0.0.4 // indirect
-	go.opencensus.io v0.24.0 // indirect
-	golang.org/x/net v0.33.0 // indirect
-	golang.org/x/sync v0.10.0 // indirect
-	golang.org/x/text v0.21.0 // indirect
-	golang.org/x/tools v0.28.0 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20240903143218-8af14fe29dc1 // indirect
-	google.golang.org/grpc v1.67.0 // indirect
-	google.golang.org/protobuf v1.36.1 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
+	github.com/sirupsen/logrus v1.8.1 // indirect
+	github.com/vishvananda/netns v0.0.0-20210104183010-2eb08e3e575f // indirect
+	go.opencensus.io v0.22.3 // indirect
+	golang.org/x/net v0.23.0 // indirect
+	golang.org/x/text v0.14.0 // indirect
+	gopkg.in/tomb.v1 v1.0.0-20141024135613-dd632973f1e7 // indirect
+	gopkg.in/yaml.v2 v2.4.0 // indirect
 )

@@ -44,13 +44,11 @@ func main() {
 	// Start UDP server
 	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf(":%s", port))
 	if err != nil {
-		log.Printf("Error from net.ResolveUDPAddr(): %s", err)
-		return
+		log.Fatalf("Error from net.ResolveUDPAddr(): %s", err)
 	}
 	sock, err := net.ListenUDP("udp", addr)
 	if err != nil {
-		log.Printf("Error from ListenUDP(): %s", err)
-		return
+		log.Fatalf("Error from ListenUDP(): %s", err)
 	}
 	defer sock.Close()
 
@@ -58,11 +56,10 @@ func main() {
 	for {
 		n, addr, err := sock.ReadFrom(buffer)
 		if err != nil {
-			log.Printf("Error from ReadFrom(): %s", err)
-			return
+			log.Fatalf("Error from ReadFrom(): %s", err)
 		}
 		sock.SetWriteDeadline(time.Now().Add(1 * time.Minute))
-		_, err = sock.WriteTo(buffer[0:n], addr)
+		n, err = sock.WriteTo(buffer[0:n], addr)
 		if err != nil {
 			return
 		}

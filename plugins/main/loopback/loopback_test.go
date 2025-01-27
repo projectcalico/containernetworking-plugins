@@ -20,13 +20,12 @@ import (
 	"os/exec"
 	"strings"
 
-	. "github.com/onsi/ginkgo/v2"
+	"github.com/containernetworking/plugins/pkg/ns"
+	"github.com/containernetworking/plugins/pkg/testutils"
+	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 	"github.com/onsi/gomega/gbytes"
 	"github.com/onsi/gomega/gexec"
-
-	"github.com/containernetworking/plugins/pkg/ns"
-	"github.com/containernetworking/plugins/pkg/testutils"
 )
 
 func generateConfig(cniVersion string) *strings.Reader {
@@ -74,8 +73,7 @@ var _ = Describe("Loopback", func() {
 				session, err := gexec.Start(command, GinkgoWriter, GinkgoWriter)
 				Expect(err).NotTo(HaveOccurred())
 
-				// "(?s)" turns on the "s" flag, making "." match newlines too.
-				Eventually(session).Should(gbytes.Say(`(?s){.*}`))
+				Eventually(session).Should(gbytes.Say(`{.*}`))
 				Eventually(session).Should(gexec.Exit(0))
 
 				var lo *net.Interface

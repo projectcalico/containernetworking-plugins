@@ -1,5 +1,3 @@
-//go:build windows
-
 package wclayer
 
 import (
@@ -14,7 +12,7 @@ import (
 // to the system.
 func LayerExists(ctx context.Context, path string) (_ bool, err error) {
 	title := "hcsshim::LayerExists"
-	ctx, span := oc.StartSpan(ctx, title) //nolint:ineffassign,staticcheck
+	ctx, span := trace.StartSpan(ctx, title) //nolint:ineffassign,staticcheck
 	defer span.End()
 	defer func() { oc.SetSpanStatus(span, err) }()
 	span.AddAttributes(trace.StringAttribute("path", path))
@@ -23,7 +21,7 @@ func LayerExists(ctx context.Context, path string) (_ bool, err error) {
 	var exists uint32
 	err = layerExists(&stdDriverInfo, path, &exists)
 	if err != nil {
-		return false, hcserror.New(err, title, "")
+		return false, hcserror.New(err, title+" - failed", "")
 	}
 	span.AddAttributes(trace.BoolAttribute("layer-exists", exists != 0))
 	return exists != 0, nil

@@ -15,10 +15,8 @@
 package link
 
 import (
-	"context"
 	"fmt"
 	"os"
-	"time"
 
 	"github.com/networkplumbing/go-nft/nft"
 	"github.com/networkplumbing/go-nft/nft/schema"
@@ -30,8 +28,8 @@ const (
 )
 
 type NftConfigurer interface {
-	Apply(*nft.Config) (*nft.Config, error)
-	Read(filterCommands ...string) (*nft.Config, error)
+	Apply(*nft.Config) error
+	Read() (*nft.Config, error)
 }
 
 type SpoofChecker struct {
@@ -39,23 +37,16 @@ type SpoofChecker struct {
 	macAddress string
 	refID      string
 	configurer NftConfigurer
-	rulestore  *nft.Config
 }
 
 type defaultNftConfigurer struct{}
 
-func (dnc defaultNftConfigurer) Apply(cfg *nft.Config) (*nft.Config, error) {
-	const timeout = 55 * time.Second
-	ctxWithTimeout, cancelFunc := context.WithTimeout(context.Background(), timeout)
-	defer cancelFunc()
-	return nft.ApplyConfigEcho(ctxWithTimeout, cfg)
+func (_ defaultNftConfigurer) Apply(cfg *nft.Config) error {
+	return nft.ApplyConfig(cfg)
 }
 
-func (dnc defaultNftConfigurer) Read(filterCommands ...string) (*nft.Config, error) {
-	const timeout = 55 * time.Second
-	ctxWithTimeout, cancelFunc := context.WithTimeout(context.Background(), timeout)
-	defer cancelFunc()
-	return nft.ReadConfigContext(ctxWithTimeout, filterCommands...)
+func (_ defaultNftConfigurer) Read() (*nft.Config, error) {
+	return nft.ReadConfig()
 }
 
 func NewSpoofChecker(iface, macAddress, refID string) *SpoofChecker {
@@ -63,7 +54,7 @@ func NewSpoofChecker(iface, macAddress, refID string) *SpoofChecker {
 }
 
 func NewSpoofCheckerWithConfigurer(iface, macAddress, refID string, configurer NftConfigurer) *SpoofChecker {
-	return &SpoofChecker{iface, macAddress, refID, configurer, nil}
+	return &SpoofChecker{iface, macAddress, refID, configurer}
 }
 
 // Setup applies nftables configuration to restrict traffic
@@ -92,7 +83,7 @@ func (sc *SpoofChecker) Setup() error {
 	macChain := sc.macChain(ifaceChain.Name)
 	baseConfig.AddChain(macChain)
 
-	if _, err := sc.configurer.Apply(baseConfig); err != nil {
+	if err := sc.configurer.Apply(baseConfig); err != nil {
 		return fmt.Errorf("failed to setup spoof-check: %v", err)
 	}
 
@@ -106,25 +97,11 @@ func (sc *SpoofChecker) Setup() error {
 	rulesConfig.AddRule(sc.matchMacRule(macChain.Name))
 	rulesConfig.AddRule(sc.dropRule(macChain.Name))
 
-	rulestore, err := sc.configurer.Apply(rulesConfig)
-	if err != nil {
+	if err := sc.configurer.Apply(rulesConfig); err != nil {
 		return fmt.Errorf("failed to setup spoof-check: %v", err)
 	}
-	sc.rulestore = rulestore
 
 	return nil
-}
-
-func (sc *SpoofChecker) findPreroutingRule(ruleToFind *schema.Rule) ([]*schema.Rule, error) {
-	ruleset := sc.rulestore
-	if ruleset == nil {
-		chain, err := sc.configurer.Read(listChainBridgeNatPrerouting()...)
-		if err != nil {
-			return nil, err
-		}
-		ruleset = chain
-	}
-	return ruleset.LookupRule(ruleToFind), nil
 }
 
 // Teardown removes the interface and mac-address specific chains and their rules.
@@ -132,25 +109,25 @@ func (sc *SpoofChecker) findPreroutingRule(ruleToFind *schema.Rule) ([]*schema.R
 // interface is removed.
 func (sc *SpoofChecker) Teardown() error {
 	ifaceChain := sc.ifaceChain()
-	expectedRuleToFind := sc.matchIfaceJumpToChainRule(preRoutingBaseChainName, ifaceChain.Name)
-	// It is safer to exclude the statement matching, avoiding cases where a current statement includes
-	// additional default entries (e.g. counters).
-	ruleToFindExcludingStatements := *expectedRuleToFind
-	ruleToFindExcludingStatements.Expr = nil
-
-	rules, ifaceMatchRuleErr := sc.findPreroutingRule(&ruleToFindExcludingStatements)
-	if ifaceMatchRuleErr == nil && len(rules) > 0 {
-		c := nft.NewConfig()
-		for _, rule := range rules {
-			c.DeleteRule(rule)
+	currentConfig, ifaceMatchRuleErr := sc.configurer.Read()
+	if ifaceMatchRuleErr == nil {
+		expectedRuleToFind := sc.matchIfaceJumpToChainRule(preRoutingBaseChainName, ifaceChain.Name)
+		// It is safer to exclude the statement matching, avoiding cases where a current statement includes
+		// additional default entries (e.g. counters).
+		ruleToFindExcludingStatements := *expectedRuleToFind
+		ruleToFindExcludingStatements.Expr = nil
+		rules := currentConfig.LookupRule(&ruleToFindExcludingStatements)
+		if len(rules) > 0 {
+			c := nft.NewConfig()
+			for _, rule := range rules {
+				c.DeleteRule(rule)
+			}
+			if err := sc.configurer.Apply(c); err != nil {
+				ifaceMatchRuleErr = fmt.Errorf("failed to delete iface match rule: %v", err)
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "spoofcheck/teardown: unable to detect iface match rule for deletion: %+v", expectedRuleToFind)
 		}
-		if _, err := sc.configurer.Apply(c); err != nil {
-			ifaceMatchRuleErr = fmt.Errorf("failed to delete iface match rule: %v", err)
-		}
-		// Drop the cache, it should contain deleted rule(s) now
-		sc.rulestore = nil
-	} else {
-		fmt.Fprintf(os.Stderr, "spoofcheck/teardown: unable to detect iface match rule for deletion: %+v", expectedRuleToFind)
 	}
 
 	regularChainsConfig := nft.NewConfig()
@@ -158,7 +135,7 @@ func (sc *SpoofChecker) Teardown() error {
 	regularChainsConfig.DeleteChain(sc.macChain(ifaceChain.Name))
 
 	var regularChainsErr error
-	if _, err := sc.configurer.Apply(regularChainsConfig); err != nil {
+	if err := sc.configurer.Apply(regularChainsConfig); err != nil {
 		regularChainsErr = fmt.Errorf("failed to delete regular chains: %v", err)
 	}
 
@@ -218,10 +195,12 @@ func (sc *SpoofChecker) matchMacRule(chain string) *schema.Rule {
 }
 
 func (sc *SpoofChecker) dropRule(chain string) *schema.Rule {
+	macRulesIndex := nft.NewRuleIndex()
 	return &schema.Rule{
 		Family: schema.FamilyBridge,
 		Table:  natTableName,
 		Chain:  chain,
+		Index:  macRulesIndex.Next(),
 		Expr: []schema.Statement{
 			{Verdict: schema.Verdict{SimpleVerdict: schema.SimpleVerdict{Drop: true}}},
 		},
@@ -229,7 +208,7 @@ func (sc *SpoofChecker) dropRule(chain string) *schema.Rule {
 	}
 }
 
-func (sc *SpoofChecker) baseChain() *schema.Chain {
+func (_ *SpoofChecker) baseChain() *schema.Chain {
 	chainPriority := -300
 	return &schema.Chain{
 		Family: schema.FamilyBridge,
@@ -251,7 +230,7 @@ func (sc *SpoofChecker) ifaceChain() *schema.Chain {
 	}
 }
 
-func (sc *SpoofChecker) macChain(ifaceChainName string) *schema.Chain {
+func (_ *SpoofChecker) macChain(ifaceChainName string) *schema.Chain {
 	macChainName := ifaceChainName + "-mac"
 	return &schema.Chain{
 		Family: schema.FamilyBridge,
@@ -263,8 +242,4 @@ func (sc *SpoofChecker) macChain(ifaceChainName string) *schema.Chain {
 func ruleComment(id string) string {
 	const refIDPrefix = "macspoofchk-"
 	return refIDPrefix + id
-}
-
-func listChainBridgeNatPrerouting() []string {
-	return []string{"chain", "bridge", natTableName, preRoutingBaseChainName}
 }

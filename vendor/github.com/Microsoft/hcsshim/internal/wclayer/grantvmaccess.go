@@ -1,5 +1,3 @@
-//go:build windows
-
 package wclayer
 
 import (
@@ -13,7 +11,7 @@ import (
 // GrantVmAccess adds access to a file for a given VM
 func GrantVmAccess(ctx context.Context, vmid string, filepath string) (err error) {
 	title := "hcsshim::GrantVmAccess"
-	ctx, span := oc.StartSpan(ctx, title) //nolint:ineffassign,staticcheck
+	ctx, span := trace.StartSpan(ctx, title) //nolint:ineffassign,staticcheck
 	defer span.End()
 	defer func() { oc.SetSpanStatus(span, err) }()
 	span.AddAttributes(
@@ -22,7 +20,7 @@ func GrantVmAccess(ctx context.Context, vmid string, filepath string) (err error
 
 	err = grantVmAccess(vmid, filepath)
 	if err != nil {
-		return hcserror.New(err, title, "")
+		return hcserror.New(err, title+" - failed", "")
 	}
 	return nil
 }

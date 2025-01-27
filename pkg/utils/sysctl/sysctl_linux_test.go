@@ -20,13 +20,12 @@ import (
 	"runtime"
 	"strings"
 
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
-	"github.com/vishvananda/netlink"
-
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/containernetworking/plugins/pkg/testutils"
 	"github.com/containernetworking/plugins/pkg/utils/sysctl"
+	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/gomega"
+	"github.com/vishvananda/netlink"
 )
 
 const (
@@ -38,7 +37,8 @@ var _ = Describe("Sysctl tests", func() {
 	var testIfaceName string
 	var cleanup func()
 
-	beforeEach := func() {
+	BeforeEach(func() {
+
 		// Save a reference to the original namespace,
 		// Add a new NS
 		currNs, err := ns.GetCurrentNS()
@@ -48,11 +48,11 @@ var _ = Describe("Sysctl tests", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		testIfaceName = fmt.Sprintf("cnitest.%d", rand.Intn(100000))
-		testLinkAttrs := netlink.NewLinkAttrs()
-		testLinkAttrs.Name = testIfaceName
-		testLinkAttrs.Namespace = netlink.NsFd(int(testNs.Fd()))
 		testIface := &netlink.Dummy{
-			LinkAttrs: testLinkAttrs,
+			LinkAttrs: netlink.LinkAttrs{
+				Name:      testIfaceName,
+				Namespace: netlink.NsFd(int(testNs.Fd())),
+			},
 		}
 
 		err = netlink.LinkAdd(testIface)
@@ -66,7 +66,8 @@ var _ = Describe("Sysctl tests", func() {
 			netlink.LinkDel(testIface)
 			currNs.Set()
 		}
-	}
+
+	})
 
 	AfterEach(func() {
 		cleanup()
@@ -74,8 +75,7 @@ var _ = Describe("Sysctl tests", func() {
 
 	Describe("Sysctl", func() {
 		It("reads keys with dot separators", func() {
-			beforeEach()
-			sysctlIfaceName := strings.ReplaceAll(testIfaceName, ".", "/")
+			sysctlIfaceName := strings.Replace(testIfaceName, ".", "/", -1)
 			sysctlKey := fmt.Sprintf(sysctlDotKeyTemplate, sysctlIfaceName)
 
 			_, err := sysctl.Sysctl(sysctlKey)
@@ -85,7 +85,6 @@ var _ = Describe("Sysctl tests", func() {
 
 	Describe("Sysctl", func() {
 		It("reads keys with slash separators", func() {
-			beforeEach()
 			sysctlKey := fmt.Sprintf(sysctlSlashKeyTemplate, testIfaceName)
 
 			_, err := sysctl.Sysctl(sysctlKey)
@@ -95,8 +94,7 @@ var _ = Describe("Sysctl tests", func() {
 
 	Describe("Sysctl", func() {
 		It("writes keys with dot separators", func() {
-			beforeEach()
-			sysctlIfaceName := strings.ReplaceAll(testIfaceName, ".", "/")
+			sysctlIfaceName := strings.Replace(testIfaceName, ".", "/", -1)
 			sysctlKey := fmt.Sprintf(sysctlDotKeyTemplate, sysctlIfaceName)
 
 			_, err := sysctl.Sysctl(sysctlKey, "1")
@@ -106,11 +104,11 @@ var _ = Describe("Sysctl tests", func() {
 
 	Describe("Sysctl", func() {
 		It("writes keys with slash separators", func() {
-			beforeEach()
 			sysctlKey := fmt.Sprintf(sysctlSlashKeyTemplate, testIfaceName)
 
 			_, err := sysctl.Sysctl(sysctlKey, "1")
 			Expect(err).NotTo(HaveOccurred())
 		})
 	})
+
 })

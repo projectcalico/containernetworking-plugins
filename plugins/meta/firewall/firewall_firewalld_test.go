@@ -22,15 +22,16 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/godbus/dbus/v5"
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
-
 	"github.com/containernetworking/cni/pkg/invoke"
 	"github.com/containernetworking/cni/pkg/skel"
 	current "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/containernetworking/plugins/pkg/testutils"
+
+	"github.com/godbus/dbus/v5"
+
+	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/gomega"
 )
 
 const ifname = "eth0"
@@ -45,21 +46,18 @@ func (f *fakeFirewalld) clear() {
 	f.source = ""
 }
 
-//nolint:unparam
 func (f *fakeFirewalld) AddSource(zone, source string) (string, *dbus.Error) {
 	f.zone = zone
 	f.source = source
 	return "", nil
 }
 
-//nolint:unparam
 func (f *fakeFirewalld) RemoveSource(zone, source string) (string, *dbus.Error) {
 	f.zone = zone
 	f.source = source
 	return "", nil
 }
 
-//nolint:unparam
 func (f *fakeFirewalld) QuerySource(zone, source string) (bool, *dbus.Error) {
 	if f.zone != zone {
 		return false, nil
@@ -85,9 +83,8 @@ func spawnSessionDbus(wg *sync.WaitGroup) (string, *exec.Cmd) {
 	// Wait for dbus-daemon to print the bus address
 	bytes, err := bufio.NewReader(stdout).ReadString('\n')
 	Expect(err).NotTo(HaveOccurred())
-	busAddr := strings.TrimSpace(bytes)
-	Expect(strings.HasPrefix(busAddr, "unix:abstract") ||
-		strings.HasPrefix(busAddr, "unix:path")).To(BeTrue())
+	busAddr := strings.TrimSpace(string(bytes))
+	Expect(strings.HasPrefix(busAddr, "unix:abstract")).To(BeTrue())
 
 	var startWg sync.WaitGroup
 	wg.Add(1)
@@ -105,7 +102,7 @@ func spawnSessionDbus(wg *sync.WaitGroup) (string, *exec.Cmd) {
 	return busAddr, cmd
 }
 
-func makeFirewalldConf(ver string, ns ns.NetNS) []byte {
+func makeFirewalldConf(ver, ifname string, ns ns.NetNS) []byte {
 	return []byte(fmt.Sprintf(`{
 	  "cniVersion": "%s",
 	  "name": "firewalld-test",
@@ -115,7 +112,7 @@ func makeFirewalldConf(ver string, ns ns.NetNS) []byte {
 	  "prevResult": {
 	    "cniVersion": "%s",
 	    "interfaces": [
-	      {"name": "eth0", "sandbox": "%s"}
+	      {"name": "%s", "sandbox": "%s"}
 	    ],
 	    "ips": [
 	      {
@@ -126,7 +123,7 @@ func makeFirewalldConf(ver string, ns ns.NetNS) []byte {
 	      }
 	    ]
 	  }
-	}`, ver, ver, ns.Path()))
+	}`, ver, ver, ifname, ns.Path()))
 }
 
 var _ = Describe("firewalld test", func() {
@@ -196,14 +193,14 @@ var _ = Describe("firewalld test", func() {
 		It(fmt.Sprintf("[%s] works with a config", ver), func() {
 			Expect(isFirewalldRunning()).To(BeTrue())
 
-			conf := makeFirewalldConf(ver, targetNs)
+			conf := makeFirewalldConf(ver, ifname, targetNs)
 			args := &skel.CmdArgs{
 				ContainerID: "dummy",
 				Netns:       targetNs.Path(),
 				IfName:      ifname,
-				StdinData:   conf,
+				StdinData:   []byte(conf),
 			}
-			_, _, err := testutils.CmdAdd(targetNs.Path(), args.ContainerID, ifname, conf, func() error {
+			_, _, err := testutils.CmdAdd(targetNs.Path(), args.ContainerID, ifname, []byte(conf), func() error {
 				return cmdAdd(args)
 			})
 			Expect(err).NotTo(HaveOccurred())
@@ -222,14 +219,14 @@ var _ = Describe("firewalld test", func() {
 		It(fmt.Sprintf("[%s] defaults to the firewalld backend", ver), func() {
 			Expect(isFirewalldRunning()).To(BeTrue())
 
-			conf := makeFirewalldConf(ver, targetNs)
+			conf := makeFirewalldConf(ver, ifname, targetNs)
 			args := &skel.CmdArgs{
 				ContainerID: "dummy",
 				Netns:       targetNs.Path(),
 				IfName:      ifname,
-				StdinData:   conf,
+				StdinData:   []byte(conf),
 			}
-			_, _, err := testutils.CmdAdd(targetNs.Path(), args.ContainerID, ifname, conf, func() error {
+			_, _, err := testutils.CmdAdd(targetNs.Path(), args.ContainerID, ifname, []byte(conf), func() error {
 				return cmdAdd(args)
 			})
 			Expect(err).NotTo(HaveOccurred())
@@ -240,14 +237,14 @@ var _ = Describe("firewalld test", func() {
 		It(fmt.Sprintf("[%s] passes through the prevResult", ver), func() {
 			Expect(isFirewalldRunning()).To(BeTrue())
 
-			conf := makeFirewalldConf(ver, targetNs)
+			conf := makeFirewalldConf(ver, ifname, targetNs)
 			args := &skel.CmdArgs{
 				ContainerID: "dummy",
 				Netns:       targetNs.Path(),
 				IfName:      ifname,
-				StdinData:   conf,
+				StdinData:   []byte(conf),
 			}
-			r, _, err := testutils.CmdAdd(targetNs.Path(), args.ContainerID, ifname, conf, func() error {
+			r, _, err := testutils.CmdAdd(targetNs.Path(), args.ContainerID, ifname, []byte(conf), func() error {
 				return cmdAdd(args)
 			})
 			Expect(err).NotTo(HaveOccurred())
@@ -255,21 +252,21 @@ var _ = Describe("firewalld test", func() {
 			result, err := current.GetResult(r)
 			Expect(err).NotTo(HaveOccurred())
 
-			Expect(result.Interfaces).To(HaveLen(1))
+			Expect(len(result.Interfaces)).To(Equal(1))
 			Expect(result.Interfaces[0].Name).To(Equal("eth0"))
-			Expect(result.IPs).To(HaveLen(1))
+			Expect(len(result.IPs)).To(Equal(1))
 			Expect(result.IPs[0].Address.String()).To(Equal("10.0.0.2/24"))
 		})
 
 		It(fmt.Sprintf("[%s] works with Check", ver), func() {
 			Expect(isFirewalldRunning()).To(BeTrue())
 
-			conf := makeFirewalldConf(ver, targetNs)
+			conf := makeFirewalldConf(ver, ifname, targetNs)
 			args := &skel.CmdArgs{
 				ContainerID: "dummy",
 				Netns:       targetNs.Path(),
 				IfName:      ifname,
-				StdinData:   conf,
+				StdinData:   []byte(conf),
 			}
 			r, _, err := testutils.CmdAddWithArgs(args, func() error {
 				return cmdAdd(args)

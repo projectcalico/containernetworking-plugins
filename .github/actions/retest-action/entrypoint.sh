@@ -27,10 +27,10 @@ curl --request GET \
     --header "authorization: Bearer ${GITHUB_TOKEN}" \
     --header "content-type: application/json" | jq '.workflow_runs | max_by(.run_number)' > run.json
 
-RUN_URL=$(jq -r '.rerun_url' run.json)
+RERUN_URL=$(jq -r '.rerun_url' run.json)
 
 curl --request POST \
-    --url "${RUN_URL}/rerun-failed-jobs" \
+    --url "${RERUN_URL}" \
     --header "authorization: Bearer ${GITHUB_TOKEN}" \
     --header "content-type: application/json"
 
