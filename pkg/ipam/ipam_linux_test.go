@@ -18,14 +18,15 @@ import (
 	"net"
 	"syscall"
 
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
-	"github.com/vishvananda/netlink"
-
 	"github.com/containernetworking/cni/pkg/types"
 	current "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/containernetworking/plugins/pkg/testutils"
+
+	"github.com/vishvananda/netlink"
+
+	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/gomega"
 )
 
 const LINK_NAME = "eth0"
@@ -41,11 +42,9 @@ func ipNetEqual(a, b *net.IPNet) bool {
 
 var _ = Describe("ConfigureIface", func() {
 	var originalNS ns.NetNS
-	var ipv4, ipv6, routev4, routev6, routev4Scope *net.IPNet
+	var ipv4, ipv6, routev4, routev6 *net.IPNet
 	var ipgw4, ipgw6, routegwv4, routegwv6 net.IP
-	var routeScope int
 	var result *current.Result
-	var routeTable int
 
 	BeforeEach(func() {
 		// Create a new NetNS so we don't modify the host
@@ -56,12 +55,11 @@ var _ = Describe("ConfigureIface", func() {
 		err = originalNS.Do(func(ns.NetNS) error {
 			defer GinkgoRecover()
 
-			linkAttrs := netlink.NewLinkAttrs()
-			linkAttrs.Name = LINK_NAME
-
 			// Add master
 			err = netlink.LinkAdd(&netlink.Dummy{
-				LinkAttrs: linkAttrs,
+				LinkAttrs: netlink.LinkAttrs{
+					Name: LINK_NAME,
+				},
 			})
 			Expect(err).NotTo(HaveOccurred())
 			_, err = netlink.LinkByName(LINK_NAME)
@@ -80,10 +78,6 @@ var _ = Describe("ConfigureIface", func() {
 		routegwv4 = net.ParseIP("1.2.3.5")
 		Expect(routegwv4).NotTo(BeNil())
 
-		_, routev4Scope, err = net.ParseCIDR("1.2.3.4/32")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(routev4Scope).NotTo(BeNil())
-
 		ipgw4 = net.ParseIP("1.2.3.1")
 		Expect(ipgw4).NotTo(BeNil())
 
@@ -99,9 +93,6 @@ var _ = Describe("ConfigureIface", func() {
 
 		ipgw6 = net.ParseIP("abcd:1234:ffff::1")
 		Expect(ipgw6).NotTo(BeNil())
-
-		routeTable := 5000
-		routeScope = 200
 
 		result = &current.Result{
 			Interfaces: []*current.Interface{
@@ -131,8 +122,6 @@ var _ = Describe("ConfigureIface", func() {
 			Routes: []*types.Route{
 				{Dst: *routev4, GW: routegwv4},
 				{Dst: *routev6, GW: routegwv6},
-				{Dst: *routev4, GW: routegwv4, Table: &routeTable},
-				{Dst: *routev4Scope, Scope: &routeScope},
 			},
 		}
 	})
@@ -154,12 +143,12 @@ var _ = Describe("ConfigureIface", func() {
 
 			v4addrs, err := netlink.AddrList(link, syscall.AF_INET)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(v4addrs).To(HaveLen(1))
-			Expect(ipNetEqual(v4addrs[0].IPNet, ipv4)).To(BeTrue())
+			Expect(len(v4addrs)).To(Equal(1))
+			Expect(ipNetEqual(v4addrs[0].IPNet, ipv4)).To(Equal(true))
 
 			v6addrs, err := netlink.AddrList(link, syscall.AF_INET6)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(v6addrs).To(HaveLen(2))
+			Expect(len(v6addrs)).To(Equal(2))
 
 			var found bool
 			for _, a := range v6addrs {
@@ -168,13 +157,13 @@ var _ = Describe("ConfigureIface", func() {
 					break
 				}
 			}
-			Expect(found).To(BeTrue())
+			Expect(found).To(Equal(true))
 
 			// Ensure the v4 route, v6 route, and subnet route
 			routes, err := netlink.RouteList(link, 0)
 			Expect(err).NotTo(HaveOccurred())
 
-			var v4found, v6found, v4Scopefound bool
+			var v4found, v6found bool
 			for _, route := range routes {
 				isv4 := route.Dst.IP.To4() != nil
 				if isv4 && ipNetEqual(route.Dst, routev4) && route.Gw.Equal(routegwv4) {
@@ -183,17 +172,13 @@ var _ = Describe("ConfigureIface", func() {
 				if !isv4 && ipNetEqual(route.Dst, routev6) && route.Gw.Equal(routegwv6) {
 					v6found = true
 				}
-				if isv4 && ipNetEqual(route.Dst, routev4Scope) && int(route.Scope) == routeScope {
-					v4Scopefound = true
-				}
 
-				if v4found && v6found && v4Scopefound {
+				if v4found && v6found {
 					break
 				}
 			}
-			Expect(v4found).To(BeTrue())
-			Expect(v6found).To(BeTrue())
-			Expect(v4Scopefound).To(BeTrue())
+			Expect(v4found).To(Equal(true))
+			Expect(v6found).To(Equal(true))
 
 			return nil
 		})
@@ -217,7 +202,7 @@ var _ = Describe("ConfigureIface", func() {
 			routes, err := netlink.RouteList(link, 0)
 			Expect(err).NotTo(HaveOccurred())
 
-			var v4found, v6found, v4Tablefound bool
+			var v4found, v6found bool
 			for _, route := range routes {
 				isv4 := route.Dst.IP.To4() != nil
 				if isv4 && ipNetEqual(route.Dst, routev4) && route.Gw.Equal(ipgw4) {
@@ -231,31 +216,8 @@ var _ = Describe("ConfigureIface", func() {
 					break
 				}
 			}
-			Expect(v4found).To(BeTrue())
-			Expect(v6found).To(BeTrue())
-
-			// Need to read all tables, so cannot use RouteList
-			routeFilter := &netlink.Route{
-				Table: routeTable,
-			}
-
-			routes, err = netlink.RouteListFiltered(netlink.FAMILY_ALL,
-				routeFilter,
-				netlink.RT_FILTER_TABLE)
-			Expect(err).NotTo(HaveOccurred())
-
-			for _, route := range routes {
-				isv4 := route.Dst.IP.To4() != nil
-				if isv4 && ipNetEqual(route.Dst, routev4) && route.Gw.Equal(ipgw4) {
-					v4Tablefound = true
-				}
-
-				if v4Tablefound {
-					break
-				}
-			}
-
-			Expect(v4Tablefound).To(BeTrue())
+			Expect(v4found).To(Equal(true))
+			Expect(v6found).To(Equal(true))
 
 			return nil
 		})

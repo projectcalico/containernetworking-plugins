@@ -51,8 +51,6 @@ type IPAMConfig struct {
 	// To override default requesting fields, set `skipDefault` to `false`.
 	// If an field is not optional, but the server failed to provide it, error will be raised.
 	RequestOptions []RequestOption `json:"request"`
-	// The metric of routes
-	Priority int `json:"priority,omitempty"`
 }
 
 // DHCPOption represents a DHCP option. It can be a number, or a string defined in manual dhcp-options(5).
@@ -80,33 +78,25 @@ func main() {
 		var broadcast bool
 		var timeout time.Duration
 		var resendMax time.Duration
-		var resendTimeout time.Duration
 		daemonFlags := flag.NewFlagSet("daemon", flag.ExitOnError)
 		daemonFlags.StringVar(&pidfilePath, "pidfile", "", "optional path to write daemon PID to")
 		daemonFlags.StringVar(&hostPrefix, "hostprefix", "", "optional prefix to host root")
 		daemonFlags.StringVar(&socketPath, "socketpath", "", "optional dhcp server socketpath")
 		daemonFlags.BoolVar(&broadcast, "broadcast", false, "broadcast DHCP leases")
-		daemonFlags.DurationVar(&timeout, "timeout", 10*time.Second, "optional dhcp client timeout duration for each request")
-		daemonFlags.DurationVar(&resendMax, "resendmax", resendDelayMax, "optional dhcp client max resend delay between requests")
-		daemonFlags.DurationVar(&resendTimeout, "resendtimeout", defaultResendTimeout, "optional dhcp client resend timeout, no more retries after this timeout")
+		daemonFlags.DurationVar(&timeout, "timeout", 10*time.Second, "optional dhcp client timeout duration")
+		daemonFlags.DurationVar(&resendMax, "resendmax", resendDelayMax, "optional dhcp client resend max duration")
 		daemonFlags.Parse(os.Args[2:])
 
 		if socketPath == "" {
 			socketPath = defaultSocketPath
 		}
 
-		if err := runDaemon(pidfilePath, hostPrefix, socketPath, timeout, resendMax, resendTimeout, broadcast); err != nil {
+		if err := runDaemon(pidfilePath, hostPrefix, socketPath, timeout, resendMax, broadcast); err != nil {
 			log.Print(err.Error())
 			os.Exit(1)
 		}
 	} else {
-		skel.PluginMainFuncs(skel.CNIFuncs{
-			Add:   cmdAdd,
-			Check: cmdCheck,
-			Del:   cmdDel,
-			/* FIXME GC */
-			/* FIXME Status */
-		}, version.All, bv.BuildString("dhcp"))
+		skel.PluginMain(cmdAdd, cmdCheck, cmdDel, version.All, bv.BuildString("dhcp"))
 	}
 }
 
@@ -128,20 +118,27 @@ func cmdAdd(args *skel.CmdArgs) error {
 
 func cmdDel(args *skel.CmdArgs) error {
 	result := struct{}{}
-	return rpcCall("DHCP.Release", args, &result)
+	if err := rpcCall("DHCP.Release", args, &result); err != nil {
+		return err
+	}
+	return nil
 }
 
 func cmdCheck(args *skel.CmdArgs) error {
 	// Plugin must return result in same version as specified in netconf
 	versionDecoder := &version.ConfigDecoder{}
-	// confVersion, err := versionDecoder.Decode(args.StdinData)
+	//confVersion, err := versionDecoder.Decode(args.StdinData)
 	_, err := versionDecoder.Decode(args.StdinData)
 	if err != nil {
 		return err
 	}
 
 	result := &current.Result{CNIVersion: current.ImplementedSpecVersion}
-	return rpcCall("DHCP.Allocate", args, result)
+	if err := rpcCall("DHCP.Allocate", args, result); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func getSocketPath(stdinData []byte) (string, error) {

@@ -1,5 +1,3 @@
-//go:build windows
-
 package hcn
 
 import (
@@ -72,8 +70,6 @@ type NetworkFlags uint32
 const (
 	None                NetworkFlags = 0
 	EnableNonPersistent NetworkFlags = 8
-	DisableHostPort     NetworkFlags = 1024
-	EnableIov           NetworkFlags = 8192
 )
 
 // HostComputeNetwork represents a network
@@ -114,14 +110,14 @@ type PolicyNetworkRequest struct {
 	Policies []NetworkPolicy `json:",omitempty"`
 }
 
-func getNetwork(networkGUID guid.GUID, query string) (*HostComputeNetwork, error) {
+func getNetwork(networkGuid guid.GUID, query string) (*HostComputeNetwork, error) {
 	// Open network.
 	var (
 		networkHandle    hcnNetwork
 		resultBuffer     *uint16
 		propertiesBuffer *uint16
 	)
-	hr := hcnOpenNetwork(&networkGUID, &networkHandle, &resultBuffer)
+	hr := hcnOpenNetwork(&networkGuid, &networkHandle, &resultBuffer)
 	if err := checkForErrors("hcnOpenNetwork", hr, resultBuffer); err != nil {
 		return nil, err
 	}
@@ -168,8 +164,8 @@ func enumerateNetworks(query string) ([]HostComputeNetwork, error) {
 	}
 
 	var outputNetworks []HostComputeNetwork
-	for _, networkGUID := range networkIds {
-		network, err := getNetwork(networkGUID, query)
+	for _, networkGuid := range networkIds {
+		network, err := getNetwork(networkGuid, query)
 		if err != nil {
 			return nil, err
 		}
@@ -185,8 +181,8 @@ func createNetwork(settings string) (*HostComputeNetwork, error) {
 		resultBuffer     *uint16
 		propertiesBuffer *uint16
 	)
-	networkGUID := guid.GUID{}
-	hr := hcnCreateNetwork(&networkGUID, settings, &networkHandle, &resultBuffer)
+	networkGuid := guid.GUID{}
+	hr := hcnCreateNetwork(&networkGuid, settings, &networkHandle, &resultBuffer)
 	if err := checkForErrors("hcnCreateNetwork", hr, resultBuffer); err != nil {
 		return nil, err
 	}
@@ -220,8 +216,8 @@ func createNetwork(settings string) (*HostComputeNetwork, error) {
 	return &outputNetwork, nil
 }
 
-func modifyNetwork(networkID string, settings string) (*HostComputeNetwork, error) {
-	networkGUID, err := guid.FromString(networkID)
+func modifyNetwork(networkId string, settings string) (*HostComputeNetwork, error) {
+	networkGuid, err := guid.FromString(networkId)
 	if err != nil {
 		return nil, errInvalidNetworkID
 	}
@@ -231,7 +227,7 @@ func modifyNetwork(networkID string, settings string) (*HostComputeNetwork, erro
 		resultBuffer     *uint16
 		propertiesBuffer *uint16
 	)
-	hr := hcnOpenNetwork(&networkGUID, &networkHandle, &resultBuffer)
+	hr := hcnOpenNetwork(&networkGuid, &networkHandle, &resultBuffer)
 	if err := checkForErrors("hcnOpenNetwork", hr, resultBuffer); err != nil {
 		return nil, err
 	}
@@ -270,13 +266,13 @@ func modifyNetwork(networkID string, settings string) (*HostComputeNetwork, erro
 	return &outputNetwork, nil
 }
 
-func deleteNetwork(networkID string) error {
-	networkGUID, err := guid.FromString(networkID)
+func deleteNetwork(networkId string) error {
+	networkGuid, err := guid.FromString(networkId)
 	if err != nil {
 		return errInvalidNetworkID
 	}
 	var resultBuffer *uint16
-	hr := hcnDeleteNetwork(&networkGUID, &resultBuffer)
+	hr := hcnDeleteNetwork(&networkGuid, &resultBuffer)
 	if err := checkForErrors("hcnDeleteNetwork", hr, resultBuffer); err != nil {
 		return err
 	}
@@ -295,12 +291,12 @@ func ListNetworks() ([]HostComputeNetwork, error) {
 
 // ListNetworksQuery makes a call to query the list of available networks.
 func ListNetworksQuery(query HostComputeQuery) ([]HostComputeNetwork, error) {
-	queryJSON, err := json.Marshal(query)
+	queryJson, err := json.Marshal(query)
 	if err != nil {
 		return nil, err
 	}
 
-	networks, err := enumerateNetworks(string(queryJSON))
+	networks, err := enumerateNetworks(string(queryJson))
 	if err != nil {
 		return nil, err
 	}
@@ -412,14 +408,14 @@ func (network *HostComputeNetwork) ModifyNetworkSettings(request *ModifyNetworkS
 func (network *HostComputeNetwork) AddPolicy(networkPolicy PolicyNetworkRequest) error {
 	logrus.Debugf("hcn::HostComputeNetwork::AddPolicy id=%s", network.Id)
 
-	settingsJSON, err := json.Marshal(networkPolicy)
+	settingsJson, err := json.Marshal(networkPolicy)
 	if err != nil {
 		return err
 	}
 	requestMessage := &ModifyNetworkSettingRequest{
 		ResourceType: NetworkResourceTypePolicy,
 		RequestType:  RequestTypeAdd,
-		Settings:     settingsJSON,
+		Settings:     settingsJson,
 	}
 
 	return network.ModifyNetworkSettings(requestMessage)
@@ -429,14 +425,14 @@ func (network *HostComputeNetwork) AddPolicy(networkPolicy PolicyNetworkRequest)
 func (network *HostComputeNetwork) RemovePolicy(networkPolicy PolicyNetworkRequest) error {
 	logrus.Debugf("hcn::HostComputeNetwork::RemovePolicy id=%s", network.Id)
 
-	settingsJSON, err := json.Marshal(networkPolicy)
+	settingsJson, err := json.Marshal(networkPolicy)
 	if err != nil {
 		return err
 	}
 	requestMessage := &ModifyNetworkSettingRequest{
 		ResourceType: NetworkResourceTypePolicy,
 		RequestType:  RequestTypeRemove,
-		Settings:     settingsJSON,
+		Settings:     settingsJson,
 	}
 
 	return network.ModifyNetworkSettings(requestMessage)

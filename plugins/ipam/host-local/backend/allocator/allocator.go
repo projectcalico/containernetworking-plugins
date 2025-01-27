@@ -22,6 +22,7 @@ import (
 	"strconv"
 
 	current "github.com/containernetworking/cni/pkg/types/100"
+
 	"github.com/containernetworking/plugins/pkg/ip"
 	"github.com/containernetworking/plugins/plugins/ipam/host-local/backend"
 )
@@ -196,7 +197,7 @@ func (i *RangeIter) Next() (*net.IPNet, net.IP) {
 	// If we've reached the end of this range, we need to advance the range
 	// RangeEnd is inclusive as well
 	if i.cur.Equal(r.RangeEnd) {
-		i.rangeIdx++
+		i.rangeIdx += 1
 		i.rangeIdx %= len(*i.rangeset)
 		r = (*i.rangeset)[i.rangeIdx]
 

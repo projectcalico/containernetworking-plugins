@@ -15,11 +15,10 @@
 package link_test
 
 import (
-	"errors"
 	"fmt"
-
 	"github.com/networkplumbing/go-nft/nft"
-	. "github.com/onsi/ginkgo/v2"
+
+	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 
 	"github.com/containernetworking/plugins/pkg/link"
@@ -114,32 +113,13 @@ var _ = Describe("spoofcheck", func() {
 			)))
 		})
 	})
-
-	Context("echo", func() {
-		It("succeeds, no read called", func() {
-			c := configurerStub{}
-			sc := link.NewSpoofCheckerWithConfigurer(iface, mac, id, &c)
-			Expect(sc.Setup()).To(Succeed())
-			Expect(sc.Teardown()).To(Succeed())
-			Expect(c.readCalled).To(BeFalse())
-		})
-
-		It("succeeds, fall back to config read", func() {
-			c := configurerStub{applyReturnNil: true}
-			sc := link.NewSpoofCheckerWithConfigurer(iface, mac, id, &c)
-			Expect(sc.Setup()).To(Succeed())
-			c.readConfig = c.applyConfig[0]
-			Expect(sc.Teardown()).To(Succeed())
-			Expect(c.readCalled).To(BeTrue())
-		})
-	})
 })
 
 func assertExpectedRegularChainsDeletionInTeardownConfig(action configurerStub) {
-	deleteRegularChainRulesJSONConfig, err := action.applyConfig[1].ToJSON()
+	deleteRegularChainRulesJsonConfig, err := action.applyConfig[1].ToJSON()
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
 
-	expectedDeleteRegularChainRulesJSONConfig := `
+	expectedDeleteRegularChainRulesJsonConfig := `
 			{"nftables": [
 				{"delete": {"chain": {
 					"family": "bridge",
@@ -153,14 +133,14 @@ func assertExpectedRegularChainsDeletionInTeardownConfig(action configurerStub) 
 				}}}
 			]}`
 
-	ExpectWithOffset(1, string(deleteRegularChainRulesJSONConfig)).To(MatchJSON(expectedDeleteRegularChainRulesJSONConfig))
+	ExpectWithOffset(1, string(deleteRegularChainRulesJsonConfig)).To(MatchJSON(expectedDeleteRegularChainRulesJsonConfig))
 }
 
 func assertExpectedBaseChainRuleDeletionInTeardownConfig(action configurerStub) {
-	deleteBaseChainRuleJSONConfig, err := action.applyConfig[0].ToJSON()
+	deleteBaseChainRuleJsonConfig, err := action.applyConfig[0].ToJSON()
 	Expect(err).NotTo(HaveOccurred())
 
-	expectedDeleteIfaceMatchRuleJSONConfig := `
+	expectedDeleteIfaceMatchRuleJsonConfig := `
             {"nftables": [
 				{"delete": {"rule": {
 					"family": "bridge",
@@ -177,7 +157,7 @@ func assertExpectedBaseChainRuleDeletionInTeardownConfig(action configurerStub) 
 					"comment": "macspoofchk-container99-net1"
 				}}}
 			]}`
-	Expect(string(deleteBaseChainRuleJSONConfig)).To(MatchJSON(expectedDeleteIfaceMatchRuleJSONConfig))
+	Expect(string(deleteBaseChainRuleJsonConfig)).To(MatchJSON(expectedDeleteIfaceMatchRuleJsonConfig))
 }
 
 func rowConfigWithRulesOnly() string {
@@ -274,6 +254,7 @@ func assertExpectedRulesInSetupConfig(c configurerStub) {
                     "comment":"macspoofchk-container99-net1"}},
                 {"rule":{"family":"bridge","table":"nat","chain":"cni-br-iface-container99-net1-mac",
                     "expr":[{"drop":null}],
+                    "index":0,
                     "comment":"macspoofchk-container99-net1"}}
             ]}`
 	ExpectWithOffset(1, string(jsonConfig)).To(MatchJSON(expectedConfig))
@@ -294,30 +275,23 @@ type configurerStub struct {
 	failFirstApplyConfig  bool
 	failSecondApplyConfig bool
 	failReadConfig        bool
-
-	applyReturnNil bool
-	readCalled     bool
 }
 
-func (a *configurerStub) Apply(c *nft.Config) (*nft.Config, error) {
+func (a *configurerStub) Apply(c *nft.Config) error {
 	a.applyCounter++
 	if a.failFirstApplyConfig && a.applyCounter == 1 {
-		return nil, errors.New(errorFirstApplyText)
+		return fmt.Errorf(errorFirstApplyText)
 	}
 	if a.failSecondApplyConfig && a.applyCounter == 2 {
-		return nil, errors.New(errorSecondApplyText)
+		return fmt.Errorf(errorSecondApplyText)
 	}
 	a.applyConfig = append(a.applyConfig, c)
-	if a.applyReturnNil {
-		return nil, nil
-	}
-	return c, nil
+	return nil
 }
 
-func (a *configurerStub) Read(_ ...string) (*nft.Config, error) {
-	a.readCalled = true
+func (a *configurerStub) Read() (*nft.Config, error) {
 	if a.failReadConfig {
-		return nil, errors.New(errorReadText)
+		return nil, fmt.Errorf(errorReadText)
 	}
 	return a.readConfig, nil
 }

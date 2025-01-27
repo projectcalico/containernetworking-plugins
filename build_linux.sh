@@ -1,8 +1,8 @@
-#!/usr/bin/env sh
+#!/usr/bin/env bash
 set -e
 cd "$(dirname "$0")"
 
-if [ "$(uname)" = "Darwin" ]; then
+if [ "$(uname)" == "Darwin" ]; then
 	export GOOS="${GOOS:-linux}"
 fi
 

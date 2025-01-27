@@ -1,5 +1,3 @@
-//go:build windows
-
 package safefile
 
 import (
@@ -158,6 +156,7 @@ func LinkRelative(oldname string, oldroot *os.File, newname string, newroot *os.
 		if (fi.FileAttributes & syscall.FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
 			return &os.LinkError{Op: "link", Old: oldf.Name(), New: filepath.Join(newroot.Name(), newname), Err: winapi.RtlNtStatusToDosError(winapi.STATUS_REPARSE_POINT_ENCOUNTERED)}
 		}
+
 	} else {
 		parent = newroot
 	}
@@ -243,7 +242,7 @@ func RemoveRelative(path string, root *os.File) error {
 	if err == nil {
 		defer f.Close()
 		err = deleteOnClose(f)
-		if err == syscall.ERROR_ACCESS_DENIED { //nolint:errorlint
+		if err == syscall.ERROR_ACCESS_DENIED {
 			// Maybe the file is marked readonly. Clear the bit and retry.
 			_ = clearReadOnly(f)
 			err = deleteOnClose(f)
@@ -276,7 +275,7 @@ func RemoveAllRelative(path string, root *os.File) error {
 	}
 
 	// It is necessary to use os.Open as Readdirnames does not work with
-	// OpenRelative. This is safe because the above LstatRelative fails
+	// OpenRelative. This is safe because the above lstatrelative fails
 	// if the target is outside the root, and we know this is not a
 	// symlink from the above FILE_ATTRIBUTE_REPARSE_POINT check.
 	fd, err := os.Open(filepath.Join(root.Name(), path))
@@ -293,12 +292,12 @@ func RemoveAllRelative(path string, root *os.File) error {
 	for {
 		names, err1 := fd.Readdirnames(100)
 		for _, name := range names {
-			if err2 := RemoveAllRelative(path+string(os.PathSeparator)+name, root); err == nil {
-				err = err2
+			err1 := RemoveAllRelative(path+string(os.PathSeparator)+name, root)
+			if err == nil {
+				err = err1
 			}
 		}
 		if err1 == io.EOF {
-			// Readdirnames has no more files to return
 			break
 		}
 		// If Readdirnames returned an error, use it.
@@ -338,33 +337,6 @@ func MkdirRelative(path string, root *os.File) error {
 		err = &os.PathError{Op: "mkdir", Path: filepath.Join(root.Name(), path), Err: err}
 	}
 	return err
-}
-
-// MkdirAllRelative creates each directory in the path relative to a root, failing if
-// any existing intermediate path components are reparse points.
-func MkdirAllRelative(path string, root *os.File) error {
-	pathParts := strings.Split(filepath.Clean(path), (string)(filepath.Separator))
-	for index := range pathParts {
-		partialPath := filepath.Join(pathParts[0 : index+1]...)
-		stat, err := LstatRelative(partialPath, root)
-
-		if err != nil {
-			if os.IsNotExist(err) {
-				if err := MkdirRelative(partialPath, root); err != nil {
-					return err
-				}
-				continue
-			}
-			return err
-		}
-
-		if !stat.IsDir() {
-			fullPath := filepath.Join(root.Name(), partialPath)
-			return &os.PathError{Op: "mkdir", Path: fullPath, Err: syscall.ENOTDIR}
-		}
-	}
-
-	return nil
 }
 
 // LstatRelative performs a stat operation on a file relative to a root, failing

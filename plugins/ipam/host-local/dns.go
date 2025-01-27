@@ -28,7 +28,6 @@ func parseResolvConf(filename string) (*types.DNS, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer fp.Close()
 
 	dns := types.DNS{}
 	scanner := bufio.NewScanner(fp)

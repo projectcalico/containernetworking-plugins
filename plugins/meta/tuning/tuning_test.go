@@ -18,26 +18,25 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
-	"os"
-	"path/filepath"
-
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
-	"github.com/vishvananda/netlink"
-	"golang.org/x/sys/unix"
 
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
-	types100 "github.com/containernetworking/cni/pkg/types/100"
+	"github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/containernetworking/plugins/pkg/testutils"
+	"golang.org/x/sys/unix"
+
+	"github.com/vishvananda/netlink"
+
+	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/gomega"
 )
 
-func buildOneConfig(cniVersion string, orig *TuningConf, prevResult types.Result) ([]byte, error) {
+func buildOneConfig(name, cniVersion string, orig *TuningConf, prevResult types.Result) (*TuningConf, []byte, error) {
 	var err error
 
 	inject := map[string]interface{}{
-		"name":       "testConfig",
+		"name":       name,
 		"cniVersion": cniVersion,
 	}
 	// Add previous plugin result
@@ -50,12 +49,12 @@ func buildOneConfig(cniVersion string, orig *TuningConf, prevResult types.Result
 
 	confBytes, err := json.Marshal(orig)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	err = json.Unmarshal(confBytes, &config)
 	if err != nil {
-		return nil, fmt.Errorf("unmarshal existing network bytes: %s", err)
+		return nil, nil, fmt.Errorf("unmarshal existing network bytes: %s", err)
 	}
 
 	for key, value := range inject {
@@ -64,33 +63,16 @@ func buildOneConfig(cniVersion string, orig *TuningConf, prevResult types.Result
 
 	newBytes, err := json.Marshal(config)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	conf := &TuningConf{}
 	if err := json.Unmarshal(newBytes, &conf); err != nil {
-		return nil, fmt.Errorf("error parsing configuration: %s", err)
+		return nil, nil, fmt.Errorf("error parsing configuration: %s", err)
 	}
 
-	return newBytes, nil
-}
+	return conf, newBytes, nil
 
-func createSysctlAllowFile(sysctls []string) error {
-	err := os.MkdirAll(defaultAllowlistDir, 0o755)
-	if err != nil {
-		return err
-	}
-	f, err := os.Create(filepath.Join(defaultAllowlistDir, defaultAllowlistFile))
-	if err != nil {
-		return err
-	}
-	for _, sysctl := range sysctls {
-		_, err = f.WriteString(fmt.Sprintf("%s\n", sysctl))
-		if err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 var _ = Describe("tuning plugin", func() {
@@ -110,10 +92,10 @@ var _ = Describe("tuning plugin", func() {
 		err = originalNS.Do(func(ns.NetNS) error {
 			defer GinkgoRecover()
 
-			linkAttrs := netlink.NewLinkAttrs()
-			linkAttrs.Name = IFNAME
 			err = netlink.LinkAdd(&netlink.Dummy{
-				LinkAttrs: linkAttrs,
+				LinkAttrs: netlink.LinkAttrs{
+					Name: IFNAME,
+				},
 			})
 			Expect(err).NotTo(HaveOccurred())
 			link, err := netlink.LinkByName(IFNAME)
@@ -125,12 +107,9 @@ var _ = Describe("tuning plugin", func() {
 			*beforeConf.Promisc = (link.Attrs().Promisc != 0)
 			beforeConf.Allmulti = new(bool)
 			*beforeConf.Allmulti = (link.Attrs().RawFlags&unix.IFF_ALLMULTI != 0)
-			beforeConf.TxQLen = new(int)
-			*beforeConf.TxQLen = link.Attrs().TxQLen
 			return nil
 		})
 		Expect(err).NotTo(HaveOccurred())
-		sysctlDuplicatesMap = map[sysctlKey]interface{}{}
 	})
 
 	AfterEach(func() {
@@ -138,7 +117,6 @@ var _ = Describe("tuning plugin", func() {
 		Expect(testutils.UnmountNS(originalNS)).To(Succeed())
 		Expect(targetNS.Close()).To(Succeed())
 		Expect(testutils.UnmountNS(targetNS)).To(Succeed())
-		os.RemoveAll(defaultAllowlistDir)
 	})
 
 	for _, ver := range []string{"0.3.0", "0.3.1", "0.4.0", "1.0.0"} {
@@ -189,9 +167,9 @@ var _ = Describe("tuning plugin", func() {
 				result, err := types100.GetResult(r)
 				Expect(err).NotTo(HaveOccurred())
 
-				Expect(result.Interfaces).To(HaveLen(1))
+				Expect(len(result.Interfaces)).To(Equal(1))
 				Expect(result.Interfaces[0].Name).To(Equal(IFNAME))
-				Expect(result.IPs).To(HaveLen(1))
+				Expect(len(result.IPs)).To(Equal(1))
 				Expect(result.IPs[0].Address.String()).To(Equal("10.0.0.2/24"))
 
 				Expect("/tmp/tuning-test/dummy_dummy0.json").ShouldNot(BeAnExistingFile())
@@ -244,9 +222,9 @@ var _ = Describe("tuning plugin", func() {
 				result, err := types100.GetResult(r)
 				Expect(err).NotTo(HaveOccurred())
 
-				Expect(result.Interfaces).To(HaveLen(1))
+				Expect(len(result.Interfaces)).To(Equal(1))
 				Expect(result.Interfaces[0].Name).To(Equal(IFNAME))
-				Expect(result.IPs).To(HaveLen(1))
+				Expect(len(result.IPs)).To(Equal(1))
 				Expect(result.IPs[0].Address.String()).To(Equal("10.0.0.2/24"))
 
 				link, err := netlink.LinkByName(IFNAME)
@@ -255,10 +233,10 @@ var _ = Describe("tuning plugin", func() {
 
 				if testutils.SpecVersionHasCHECK(ver) {
 					n := &TuningConf{}
-					err = json.Unmarshal(conf, &n)
+					err = json.Unmarshal([]byte(conf), &n)
 					Expect(err).NotTo(HaveOccurred())
 
-					confString, err := buildOneConfig(ver, n, r)
+					_, confString, err := buildOneConfig("testConfig", ver, n, r)
 					Expect(err).NotTo(HaveOccurred())
 
 					args.StdinData = confString
@@ -325,9 +303,9 @@ var _ = Describe("tuning plugin", func() {
 				result, err := types100.GetResult(r)
 				Expect(err).NotTo(HaveOccurred())
 
-				Expect(result.Interfaces).To(HaveLen(1))
+				Expect(len(result.Interfaces)).To(Equal(1))
 				Expect(result.Interfaces[0].Name).To(Equal(IFNAME))
-				Expect(result.IPs).To(HaveLen(1))
+				Expect(len(result.IPs)).To(Equal(1))
 				Expect(result.IPs[0].Address.String()).To(Equal("10.0.0.2/24"))
 
 				link, err := netlink.LinkByName(IFNAME)
@@ -386,9 +364,9 @@ var _ = Describe("tuning plugin", func() {
 				result, err := types100.GetResult(r)
 				Expect(err).NotTo(HaveOccurred())
 
-				Expect(result.Interfaces).To(HaveLen(1))
+				Expect(len(result.Interfaces)).To(Equal(1))
 				Expect(result.Interfaces[0].Name).To(Equal(IFNAME))
-				Expect(result.IPs).To(HaveLen(1))
+				Expect(len(result.IPs)).To(Equal(1))
 				Expect(result.IPs[0].Address.String()).To(Equal("10.0.0.2/24"))
 
 				link, err := netlink.LinkByName(IFNAME)
@@ -397,10 +375,10 @@ var _ = Describe("tuning plugin", func() {
 
 				if testutils.SpecVersionHasCHECK(ver) {
 					n := &TuningConf{}
-					err = json.Unmarshal(conf, &n)
+					err = json.Unmarshal([]byte(conf), &n)
 					Expect(err).NotTo(HaveOccurred())
 
-					confString, err := buildOneConfig(ver, n, r)
+					_, confString, err := buildOneConfig("testConfig", ver, n, r)
 					Expect(err).NotTo(HaveOccurred())
 
 					args.StdinData = confString
@@ -467,9 +445,9 @@ var _ = Describe("tuning plugin", func() {
 				result, err := types100.GetResult(r)
 				Expect(err).NotTo(HaveOccurred())
 
-				Expect(result.Interfaces).To(HaveLen(1))
+				Expect(len(result.Interfaces)).To(Equal(1))
 				Expect(result.Interfaces[0].Name).To(Equal(IFNAME))
-				Expect(result.IPs).To(HaveLen(1))
+				Expect(len(result.IPs)).To(Equal(1))
 				Expect(result.IPs[0].Address.String()).To(Equal("10.0.0.2/24"))
 
 				link, err := netlink.LinkByName(IFNAME)
@@ -483,138 +461,6 @@ var _ = Describe("tuning plugin", func() {
 				link, err = netlink.LinkByName(IFNAME)
 				Expect(err).NotTo(HaveOccurred())
 				Expect(link.Attrs().MTU).To(Equal(beforeConf.Mtu))
-
-				return nil
-			})
-			Expect(err).NotTo(HaveOccurred())
-		})
-
-		It(fmt.Sprintf("[%s] configures and deconfigures tx queue len with ADD/DEL", ver), func() {
-			conf := []byte(fmt.Sprintf(`{
-				"name": "test",
-				"type": "iplink",
-				"cniVersion": "%s",
-				"txQLen": 20000,
-				"prevResult": {
-					"interfaces": [
-						{"name": "dummy0", "sandbox":"netns"}
-					],
-					"ips": [
-						{
-							"version": "4",
-							"address": "10.0.0.2/24",
-							"gateway": "10.0.0.1",
-							"interface": 0
-						}
-					]
-				}
-			}`, ver))
-
-			args := &skel.CmdArgs{
-				ContainerID: "dummy",
-				Netns:       originalNS.Path(),
-				IfName:      IFNAME,
-				StdinData:   conf,
-			}
-
-			err := originalNS.Do(func(ns.NetNS) error {
-				defer GinkgoRecover()
-
-				r, _, err := testutils.CmdAddWithArgs(args, func() error {
-					return cmdAdd(args)
-				})
-				Expect(err).NotTo(HaveOccurred())
-
-				link, err := netlink.LinkByName(IFNAME)
-				Expect(err).NotTo(HaveOccurred())
-				Expect(link.Attrs().TxQLen).To(Equal(20000))
-
-				if testutils.SpecVersionHasCHECK(ver) {
-					n := &TuningConf{}
-					Expect(json.Unmarshal(conf, &n)).NotTo(HaveOccurred())
-
-					confString, err := buildOneConfig(ver, n, r)
-					Expect(err).NotTo(HaveOccurred())
-
-					args.StdinData = confString
-
-					Expect(testutils.CmdCheckWithArgs(args, func() error {
-						return cmdCheck(args)
-					})).NotTo(HaveOccurred())
-				}
-
-				err = testutils.CmdDel(originalNS.Path(),
-					args.ContainerID, "", func() error { return cmdDel(args) })
-				Expect(err).NotTo(HaveOccurred())
-
-				link, err = netlink.LinkByName(IFNAME)
-				Expect(err).NotTo(HaveOccurred())
-				Expect(link.Attrs().TxQLen).To(Equal(*beforeConf.TxQLen))
-
-				return nil
-			})
-			Expect(err).NotTo(HaveOccurred())
-		})
-
-		It(fmt.Sprintf("[%s] configures and deconfigures tx queue len from args with ADD/DEL", ver), func() {
-			conf := []byte(fmt.Sprintf(`{
-				"name": "test",
-				"type": "iplink",
-				"cniVersion": "%s",
-				"args": {
-				    "cni": {
-					"txQLen": 20000
-				    }
-				},
-				"prevResult": {
-					"interfaces": [
-						{"name": "dummy0", "sandbox":"netns"}
-					],
-					"ips": [
-						{
-							"version": "4",
-							"address": "10.0.0.2/24",
-							"gateway": "10.0.0.1",
-							"interface": 0
-						}
-					]
-				}
-			}`, ver))
-
-			args := &skel.CmdArgs{
-				ContainerID: "dummy",
-				Netns:       originalNS.Path(),
-				IfName:      IFNAME,
-				StdinData:   conf,
-			}
-
-			err := originalNS.Do(func(ns.NetNS) error {
-				defer GinkgoRecover()
-
-				r, _, err := testutils.CmdAddWithArgs(args, func() error {
-					return cmdAdd(args)
-				})
-				Expect(err).NotTo(HaveOccurred())
-
-				result, err := types100.GetResult(r)
-				Expect(err).NotTo(HaveOccurred())
-
-				Expect(result.Interfaces).To(HaveLen(1))
-				Expect(result.Interfaces[0].Name).To(Equal(IFNAME))
-				Expect(result.IPs).To(HaveLen(1))
-				Expect(result.IPs[0].Address.String()).To(Equal("10.0.0.2/24"))
-
-				link, err := netlink.LinkByName(IFNAME)
-				Expect(err).NotTo(HaveOccurred())
-				Expect(link.Attrs().TxQLen).To(Equal(20000))
-
-				err = testutils.CmdDel(originalNS.Path(),
-					args.ContainerID, "", func() error { return cmdDel(args) })
-				Expect(err).NotTo(HaveOccurred())
-
-				link, err = netlink.LinkByName(IFNAME)
-				Expect(err).NotTo(HaveOccurred())
-				Expect(link.Attrs().TxQLen).To(Equal(*beforeConf.TxQLen))
 
 				return nil
 			})
@@ -661,9 +507,9 @@ var _ = Describe("tuning plugin", func() {
 				result, err := types100.GetResult(r)
 				Expect(err).NotTo(HaveOccurred())
 
-				Expect(result.Interfaces).To(HaveLen(1))
+				Expect(len(result.Interfaces)).To(Equal(1))
 				Expect(result.Interfaces[0].Name).To(Equal(IFNAME))
-				Expect(result.IPs).To(HaveLen(1))
+				Expect(len(result.IPs)).To(Equal(1))
 				Expect(result.IPs[0].Address.String()).To(Equal("10.0.0.2/24"))
 
 				Expect(result.Interfaces[0].Mac).To(Equal(mac))
@@ -675,10 +521,10 @@ var _ = Describe("tuning plugin", func() {
 
 				if testutils.SpecVersionHasCHECK(ver) {
 					n := &TuningConf{}
-					err = json.Unmarshal(conf, &n)
+					err = json.Unmarshal([]byte(conf), &n)
 					Expect(err).NotTo(HaveOccurred())
 
-					confString, err := buildOneConfig(ver, n, r)
+					_, confString, err := buildOneConfig("testConfig", ver, n, r)
 					Expect(err).NotTo(HaveOccurred())
 
 					args.StdinData = confString
@@ -745,9 +591,9 @@ var _ = Describe("tuning plugin", func() {
 				result, err := types100.GetResult(r)
 				Expect(err).NotTo(HaveOccurred())
 
-				Expect(result.Interfaces).To(HaveLen(1))
+				Expect(len(result.Interfaces)).To(Equal(1))
 				Expect(result.Interfaces[0].Name).To(Equal(IFNAME))
-				Expect(result.IPs).To(HaveLen(1))
+				Expect(len(result.IPs)).To(Equal(1))
 				Expect(result.IPs[0].Address.String()).To(Equal("10.0.0.2/24"))
 
 				link, err := netlink.LinkByName(IFNAME)
@@ -808,9 +654,9 @@ var _ = Describe("tuning plugin", func() {
 				result, err := types100.GetResult(r)
 				Expect(err).NotTo(HaveOccurred())
 
-				Expect(result.Interfaces).To(HaveLen(1))
+				Expect(len(result.Interfaces)).To(Equal(1))
 				Expect(result.Interfaces[0].Name).To(Equal(IFNAME))
-				Expect(result.IPs).To(HaveLen(1))
+				Expect(len(result.IPs)).To(Equal(1))
 				Expect(result.IPs[0].Address.String()).To(Equal("10.0.0.2/24"))
 
 				link, err := netlink.LinkByName(IFNAME)
@@ -821,10 +667,10 @@ var _ = Describe("tuning plugin", func() {
 
 				if testutils.SpecVersionHasCHECK(ver) {
 					n := &TuningConf{}
-					err = json.Unmarshal(conf, &n)
+					err = json.Unmarshal([]byte(conf), &n)
 					Expect(err).NotTo(HaveOccurred())
 
-					confString, err := buildOneConfig(ver, n, r)
+					_, confString, err := buildOneConfig("testConfig", ver, n, r)
 					Expect(err).NotTo(HaveOccurred())
 
 					args.StdinData = confString
@@ -890,9 +736,9 @@ var _ = Describe("tuning plugin", func() {
 				result, err := types100.GetResult(r)
 				Expect(err).NotTo(HaveOccurred())
 
-				Expect(result.Interfaces).To(HaveLen(1))
+				Expect(len(result.Interfaces)).To(Equal(1))
 				Expect(result.Interfaces[0].Name).To(Equal(IFNAME))
-				Expect(result.IPs).To(HaveLen(1))
+				Expect(len(result.IPs)).To(Equal(1))
 				Expect(result.IPs[0].Address.String()).To(Equal("10.0.0.2/24"))
 
 				link, err := netlink.LinkByName(IFNAME)
@@ -914,7 +760,7 @@ var _ = Describe("tuning plugin", func() {
 			Expect(err).NotTo(HaveOccurred())
 		})
 
-		It(fmt.Sprintf("[%s] configures and deconfigures mac address, promisc mode, MTU and tx queue len (from conf file) with custom dataDir", ver), func() {
+		It(fmt.Sprintf("[%s] configures and deconfigures mac address, promisc mode and MTU (from conf file) with custom dataDir", ver), func() {
 			conf := []byte(fmt.Sprintf(`{
 				"name": "test",
 				"type": "iplink",
@@ -922,7 +768,6 @@ var _ = Describe("tuning plugin", func() {
 				"mac": "c2:11:22:33:44:77",
 				"promisc": true,
 				"mtu": 4000,
-				"txQLen": 20000,
 				"dataDir": "/tmp/tuning-test",
 				"prevResult": {
 					"interfaces": [
@@ -957,9 +802,9 @@ var _ = Describe("tuning plugin", func() {
 				result, err := types100.GetResult(r)
 				Expect(err).NotTo(HaveOccurred())
 
-				Expect(result.Interfaces).To(HaveLen(1))
+				Expect(len(result.Interfaces)).To(Equal(1))
 				Expect(result.Interfaces[0].Name).To(Equal(IFNAME))
-				Expect(result.IPs).To(HaveLen(1))
+				Expect(len(result.IPs)).To(Equal(1))
 				Expect(result.IPs[0].Address.String()).To(Equal("10.0.0.2/24"))
 
 				link, err := netlink.LinkByName(IFNAME)
@@ -969,16 +814,15 @@ var _ = Describe("tuning plugin", func() {
 				Expect(link.Attrs().HardwareAddr).To(Equal(hw))
 				Expect(link.Attrs().Promisc).To(Equal(1))
 				Expect(link.Attrs().MTU).To(Equal(4000))
-				Expect(link.Attrs().TxQLen).To(Equal(20000))
 
 				Expect("/tmp/tuning-test/dummy_dummy0.json").Should(BeAnExistingFile())
 
 				if testutils.SpecVersionHasCHECK(ver) {
 					n := &TuningConf{}
-					err = json.Unmarshal(conf, &n)
+					err = json.Unmarshal([]byte(conf), &n)
 					Expect(err).NotTo(HaveOccurred())
 
-					confString, err := buildOneConfig(ver, n, r)
+					_, confString, err := buildOneConfig("testConfig", ver, n, r)
 					Expect(err).NotTo(HaveOccurred())
 
 					args.StdinData = confString
@@ -998,7 +842,6 @@ var _ = Describe("tuning plugin", func() {
 				Expect(link.Attrs().HardwareAddr.String()).To(Equal(beforeConf.Mac))
 				Expect(link.Attrs().MTU).To(Equal(beforeConf.Mtu))
 				Expect(link.Attrs().Promisc != 0).To(Equal(*beforeConf.Promisc))
-				Expect(link.Attrs().TxQLen).To(Equal(*beforeConf.TxQLen))
 
 				return nil
 			})
@@ -1044,21 +887,21 @@ var _ = Describe("tuning plugin", func() {
 				result, err := types100.GetResult(r)
 				Expect(err).NotTo(HaveOccurred())
 
-				Expect(result.Interfaces).To(HaveLen(1))
+				Expect(len(result.Interfaces)).To(Equal(1))
 				Expect(result.Interfaces[0].Name).To(Equal(IFNAME))
-				Expect(result.IPs).To(HaveLen(1))
+				Expect(len(result.IPs)).To(Equal(1))
 				Expect(result.IPs[0].Address.String()).To(Equal("10.0.0.2/24"))
 
 				link, err := netlink.LinkByName(IFNAME)
 				Expect(err).NotTo(HaveOccurred())
-				Expect(link.Attrs().RawFlags & unix.IFF_ALLMULTI).NotTo(BeZero())
+				Expect(link.Attrs().RawFlags&unix.IFF_ALLMULTI != 0).To(BeTrue())
 
 				if testutils.SpecVersionHasCHECK(ver) {
 					n := &TuningConf{}
-					err = json.Unmarshal(conf, &n)
+					err = json.Unmarshal([]byte(conf), &n)
 					Expect(err).NotTo(HaveOccurred())
 
-					confString, err := buildOneConfig(ver, n, r)
+					_, confString, err := buildOneConfig("testConfig", ver, n, r)
 					Expect(err).NotTo(HaveOccurred())
 
 					args.StdinData = confString
@@ -1125,14 +968,14 @@ var _ = Describe("tuning plugin", func() {
 				result, err := types100.GetResult(r)
 				Expect(err).NotTo(HaveOccurred())
 
-				Expect(result.Interfaces).To(HaveLen(1))
+				Expect(len(result.Interfaces)).To(Equal(1))
 				Expect(result.Interfaces[0].Name).To(Equal(IFNAME))
-				Expect(result.IPs).To(HaveLen(1))
+				Expect(len(result.IPs)).To(Equal(1))
 				Expect(result.IPs[0].Address.String()).To(Equal("10.0.0.2/24"))
 
 				link, err := netlink.LinkByName(IFNAME)
 				Expect(err).NotTo(HaveOccurred())
-				Expect(link.Attrs().RawFlags & unix.IFF_ALLMULTI).NotTo(BeZero())
+				Expect(link.Attrs().RawFlags&unix.IFF_ALLMULTI != 0).To(BeTrue())
 
 				err = testutils.CmdDel(originalNS.Path(),
 					args.ContainerID, "", func() error { return cmdDel(args) })
@@ -1146,211 +989,5 @@ var _ = Describe("tuning plugin", func() {
 			})
 			Expect(err).NotTo(HaveOccurred())
 		})
-
-		It(fmt.Sprintf("[%s] passes prevResult through unchanged", ver), func() {
-			conf := []byte(fmt.Sprintf(`{
-				"name": "test",
-				"type": "tuning",
-				"cniVersion": "%s",
-				"sysctl": {
-					"net.ipv4.conf.all.log_martians": "1"
-				},
-				"prevResult": {
-					"interfaces": [
-						{"name": "dummy0", "sandbox":"netns"}
-					],
-					"ips": [
-						{
-							"version": "4",
-							"address": "10.0.0.2/24",
-							"gateway": "10.0.0.1",
-							"interface": 0
-						}
-					]
-				}
-			}`, ver))
-
-			args := &skel.CmdArgs{
-				ContainerID: "dummy",
-				Netns:       targetNS.Path(),
-				IfName:      IFNAME,
-				StdinData:   conf,
-			}
-
-			beforeConf = configToRestore{}
-
-			err := createSysctlAllowFile([]string{"^net\\.ipv4\\.conf\\.other\\.[a-z_]*$"})
-			Expect(err).NotTo(HaveOccurred())
-
-			err = originalNS.Do(func(ns.NetNS) error {
-				defer GinkgoRecover()
-
-				_, _, err := testutils.CmdAddWithArgs(args, func() error {
-					return cmdAdd(args)
-				})
-				Expect(err).To(HaveOccurred())
-
-				err = testutils.CmdDel(originalNS.Path(),
-					args.ContainerID, "", func() error { return cmdDel(args) })
-				Expect(err).NotTo(HaveOccurred())
-
-				return nil
-			})
-			Expect(err).NotTo(HaveOccurred())
-		})
-
-		It(fmt.Sprintf("[%s] passes prevResult through unchanged", ver), func() {
-			conf := []byte(fmt.Sprintf(`{
-				"name": "test",
-				"type": "tuning",
-				"cniVersion": "%s",
-				"sysctl": {
-					"net.ipv4.conf.all.log_martians": "1"
-				},
-				"prevResult": {
-					"interfaces": [
-						{"name": "dummy0", "sandbox":"netns"}
-					],
-					"ips": [
-						{
-							"version": "4",
-							"address": "10.0.0.2/24",
-							"gateway": "10.0.0.1",
-							"interface": 0
-						}
-					]
-				}
-			}`, ver))
-
-			args := &skel.CmdArgs{
-				ContainerID: "dummy",
-				Netns:       targetNS.Path(),
-				IfName:      IFNAME,
-				StdinData:   conf,
-			}
-
-			err := createSysctlAllowFile([]string{"^net\\.ipv4\\.conf\\.all\\.[a-z_]*$"})
-			Expect(err).NotTo(HaveOccurred())
-
-			beforeConf = configToRestore{}
-
-			err = originalNS.Do(func(ns.NetNS) error {
-				defer GinkgoRecover()
-
-				r, _, err := testutils.CmdAddWithArgs(args, func() error {
-					return cmdAdd(args)
-				})
-				Expect(err).NotTo(HaveOccurred())
-
-				result, err := types100.GetResult(r)
-				Expect(err).NotTo(HaveOccurred())
-
-				Expect(result.Interfaces).To(HaveLen(1))
-				Expect(result.Interfaces[0].Name).To(Equal(IFNAME))
-				Expect(result.IPs).To(HaveLen(1))
-				Expect(result.IPs[0].Address.String()).To(Equal("10.0.0.2/24"))
-
-				err = testutils.CmdDel(originalNS.Path(),
-					args.ContainerID, "", func() error { return cmdDel(args) })
-				Expect(err).NotTo(HaveOccurred())
-
-				return nil
-			})
-			Expect(err).NotTo(HaveOccurred())
-		})
-
-		It(fmt.Sprintf("[%s] does not allow duplicated sysctl values", ver), func() {
-			conf := []byte(fmt.Sprintf(`{
-				"name": "test",
-				"type": "tuning",
-				"cniVersion": "%s",
-				"sysctl": {
-					"net.ipv4.conf.all.log_martians": "1",
-					"net.ipv4.conf.all.log_martians": "0"
-				},
-				"prevResult": {
-					"interfaces": [
-						{"name": "dummy0", "sandbox":"netns"}
-					],
-					"ips": [
-						{
-							"version": "4",
-							"address": "10.0.0.2/24",
-							"gateway": "10.0.0.1",
-							"interface": 0
-						}
-					]
-				}
-			}`, ver))
-
-			args := &skel.CmdArgs{
-				ContainerID: "dummy",
-				Netns:       targetNS.Path(),
-				IfName:      IFNAME,
-				StdinData:   conf,
-			}
-
-			beforeConf = configToRestore{}
-
-			err := originalNS.Do(func(ns.NetNS) error {
-				defer GinkgoRecover()
-
-				_, _, err := testutils.CmdAddWithArgs(args, func() error {
-					return cmdAdd(args)
-				})
-				Expect(err).To(HaveOccurred())
-				Expect(err.Error()).To(ContainSubstring("duplicated"))
-
-				return nil
-			})
-			Expect(err).NotTo(HaveOccurred())
-		})
-
-		It(fmt.Sprintf("[%s] does not allow ifname with path separator", ver), func() {
-			conf := []byte(fmt.Sprintf(`{
-				"name": "test",
-				"type": "tuning",
-				"cniVersion": "%s",
-				"sysctl": {
-					"net.ipv4.conf.all.log_martians": "1"
-				},
-				"prevResult": {
-					"interfaces": [
-						{"name": "eth/0", "sandbox":"netns"}
-					],
-					"ips": [
-						{
-							"version": "4",
-							"address": "10.0.0.2/24",
-							"gateway": "10.0.0.1",
-							"interface": 0
-						}
-					]
-				}
-			}`, ver))
-
-			args := &skel.CmdArgs{
-				ContainerID: "dummy",
-				Netns:       targetNS.Path(),
-				IfName:      "eth/0",
-				StdinData:   conf,
-			}
-
-			beforeConf = configToRestore{}
-
-			err := originalNS.Do(func(ns.NetNS) error {
-				defer GinkgoRecover()
-
-				_, _, err := testutils.CmdAddWithArgs(args, func() error {
-					return cmdAdd(args)
-				})
-				Expect(err).To(HaveOccurred())
-				Expect(err.Error()).To(ContainSubstring("invalid character"))
-
-				return nil
-			})
-			Expect(err).NotTo(HaveOccurred())
-		})
-
 	}
 })

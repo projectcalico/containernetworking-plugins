@@ -24,13 +24,14 @@ import (
 	"strings"
 	"testing"
 
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
+	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/onsi/gomega/gbytes"
 	"github.com/onsi/gomega/gexec"
+
 	"github.com/vishvananda/netlink"
 
-	"github.com/containernetworking/plugins/pkg/ns"
+	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/gomega"
 )
 
 func TestTBF(t *testing.T) {
@@ -66,7 +67,7 @@ func startInNetNS(binPath string, netNS ns.NetNS) (*gexec.Session, error) {
 	return session, err
 }
 
-func startEchoServerInNamespace(netNS ns.NetNS) (int, *gexec.Session) {
+func startEchoServerInNamespace(netNS ns.NetNS) (int, *gexec.Session, error) {
 	session, err := startInNetNS(echoServerBinaryPath, netNS)
 	Expect(err).NotTo(HaveOccurred())
 
@@ -83,10 +84,10 @@ func startEchoServerInNamespace(netNS ns.NetNS) (int, *gexec.Session) {
 		io.Copy(GinkgoWriter, io.MultiReader(session.Out, session.Err))
 	}()
 
-	return port, session
+	return port, session, nil
 }
 
-func makeTCPClientInNS(netns string, address string, port int, numBytes int) {
+func makeTcpClientInNS(netns string, address string, port int, numBytes int) {
 	payload := bytes.Repeat([]byte{'a'}, numBytes)
 	message := string(payload)
 
@@ -106,13 +107,13 @@ func makeTCPClientInNS(netns string, address string, port int, numBytes int) {
 }
 
 func createVeth(hostNs ns.NetNS, hostVethIfName string, containerNs ns.NetNS, containerVethIfName string, hostIP []byte, containerIP []byte, hostIfaceMTU int) {
-	linkAttrs := netlink.NewLinkAttrs()
-	linkAttrs.Name = hostVethIfName
-	linkAttrs.Flags = net.FlagUp
-	linkAttrs.MTU = hostIfaceMTU
 	vethDeviceRequest := &netlink.Veth{
-		LinkAttrs: linkAttrs,
-		PeerName:  containerVethIfName,
+		LinkAttrs: netlink.LinkAttrs{
+			Name:  hostVethIfName,
+			Flags: net.FlagUp,
+			MTU:   hostIfaceMTU,
+		},
+		PeerName: containerVethIfName,
 	}
 
 	err := hostNs.Do(func(_ ns.NetNS) error {
@@ -193,12 +194,12 @@ func createVeth(hostNs ns.NetNS, hostVethIfName string, containerNs ns.NetNS, co
 }
 
 func createVethInOneNs(netNS ns.NetNS, vethName, peerName string) {
-	linkAttrs := netlink.NewLinkAttrs()
-	linkAttrs.Name = vethName
-	linkAttrs.Flags = net.FlagUp
 	vethDeviceRequest := &netlink.Veth{
-		LinkAttrs: linkAttrs,
-		PeerName:  peerName,
+		LinkAttrs: netlink.LinkAttrs{
+			Name:  vethName,
+			Flags: net.FlagUp,
+		},
+		PeerName: peerName,
 	}
 
 	err := netNS.Do(func(_ ns.NetNS) error {
@@ -222,13 +223,13 @@ func createMacvlan(netNS ns.NetNS, master, macvlanName string) {
 			return fmt.Errorf("failed to lookup master %q: %v", master, err)
 		}
 
-		linkAttrs := netlink.NewLinkAttrs()
-		linkAttrs.MTU = m.Attrs().MTU
-		linkAttrs.Name = macvlanName
-		linkAttrs.ParentIndex = m.Attrs().Index
 		macvlanDeviceRequest := &netlink.Macvlan{
-			LinkAttrs: linkAttrs,
-			Mode:      netlink.MACVLAN_MODE_BRIDGE,
+			LinkAttrs: netlink.LinkAttrs{
+				MTU:         m.Attrs().MTU,
+				Name:        macvlanName,
+				ParentIndex: m.Attrs().Index,
+			},
+			Mode: netlink.MACVLAN_MODE_BRIDGE,
 		}
 
 		if err = netlink.LinkAdd(macvlanDeviceRequest); err != nil {

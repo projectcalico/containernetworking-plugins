@@ -26,6 +26,7 @@ import (
 	"github.com/containernetworking/cni/pkg/types"
 	current "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/cni/pkg/version"
+
 	"github.com/containernetworking/plugins/pkg/ns"
 	bv "github.com/containernetworking/plugins/pkg/utils/buildversion"
 )
@@ -111,7 +112,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 		r := &current.Result{
 			CNIVersion: conf.CNIVersion,
 			Interfaces: []*current.Interface{
-				{
+				&current.Interface{
 					Name:    args.IfName,
 					Mac:     "00:00:00:00:00:00",
 					Sandbox: args.Netns,
@@ -158,27 +159,14 @@ func cmdDel(args *skel.CmdArgs) error {
 		return nil
 	})
 	if err != nil {
-		//  if NetNs is passed down by the Cloud Orchestration Engine, or if it called multiple times
-		// so don't return an error if the device is already removed.
-		// https://github.com/kubernetes/kubernetes/issues/43014#issuecomment-287164444
-		_, ok := err.(ns.NSPathNotExistErr)
-		if ok {
-			return nil
-		}
-		return err
+		return err // not tested
 	}
 
 	return nil
 }
 
 func main() {
-	skel.PluginMainFuncs(skel.CNIFuncs{
-		Add:   cmdAdd,
-		Check: cmdCheck,
-		Del:   cmdDel,
-		/* FIXME GC */
-		/* FIXME Status */
-	}, version.All, bv.BuildString("loopback"))
+	skel.PluginMain(cmdAdd, cmdCheck, cmdDel, version.All, bv.BuildString("loopback"))
 }
 
 func cmdCheck(args *skel.CmdArgs) error {

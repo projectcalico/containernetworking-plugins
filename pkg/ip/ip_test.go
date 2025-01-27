@@ -19,7 +19,7 @@ import (
 	"fmt"
 	"net"
 
-	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 )
 
@@ -124,7 +124,7 @@ var _ = Describe("IP Operations", func() {
 		}
 
 		for _, test := range testCases {
-			Expect(test.ip.ToIP()).To(HaveLen(test.expectedLen))
+			Expect(len(test.ip.ToIP())).To(Equal(test.expectedLen))
 			Expect(test.ip.ToIP()).To(Equal(test.expectedIP))
 		}
 	})
@@ -174,8 +174,8 @@ var _ = Describe("IP Operations", func() {
 		}
 	})
 
-	Context("Decode", func() {
-		It("valid IP", func() {
+	It("Decode", func() {
+		Context("valid IP", func() {
 			testCases := []struct {
 				text     string
 				expected *IP
@@ -205,9 +205,10 @@ var _ = Describe("IP Operations", func() {
 				Expect(err).NotTo(HaveOccurred())
 				Expect(ip).To(Equal(test.expected))
 			}
+
 		})
 
-		It("empty text", func() {
+		Context("empty text", func() {
 			ip := &IP{}
 			err := json.Unmarshal([]byte(`""`), ip)
 
@@ -215,7 +216,7 @@ var _ = Describe("IP Operations", func() {
 			Expect(ip).To(Equal(newIP(nil, nil)))
 		})
 
-		It("invalid IP", func() {
+		Context("invalid IP", func() {
 			testCases := []struct {
 				text        string
 				expectedErr error
@@ -242,7 +243,7 @@ var _ = Describe("IP Operations", func() {
 			}
 		})
 
-		It("IP slice", func() {
+		Context("IP slice", func() {
 			testCases := []struct {
 				text     string
 				expected []*IP

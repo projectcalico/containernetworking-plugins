@@ -24,17 +24,18 @@ import (
 	"os/exec"
 	"path/filepath"
 
-	"github.com/coreos/go-iptables/iptables"
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
-	"github.com/onsi/gomega/gexec"
-	"github.com/vishvananda/netlink"
-
 	"github.com/containernetworking/cni/libcni"
 	types100 "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/containernetworking/plugins/pkg/testutils"
+	"github.com/coreos/go-iptables/iptables"
+	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/gomega"
+	"github.com/onsi/gomega/gexec"
+	"github.com/vishvananda/netlink"
 )
+
+const TIMEOUT = 90
 
 func makeConfig(ver string) *libcni.NetworkConfigList {
 	configList, err := libcni.ConfListFromBytes([]byte(fmt.Sprintf(`{
@@ -83,7 +84,8 @@ var _ = Describe("portmap integration tests", func() {
 		fmt.Fprintln(GinkgoWriter, "namespace:", targetNS.Path())
 
 		// Start an echo server and get the port
-		containerPort, session = StartEchoServerInNamespace(targetNS)
+		containerPort, session, err = StartEchoServerInNamespace(targetNS)
+		Expect(err).NotTo(HaveOccurred())
 	})
 
 	AfterEach(func() {
@@ -222,7 +224,7 @@ var _ = Describe("portmap integration tests", func() {
 				}
 
 				close(done)
-			})
+			}, TIMEOUT*9)
 
 			It(fmt.Sprintf("[%s] forwards a UDP port on ipv4 and keep working after creating a second container with the same HostPort", ver), func(done Done) {
 				var err error
@@ -328,7 +330,8 @@ var _ = Describe("portmap integration tests", func() {
 				fmt.Fprintln(GinkgoWriter, "namespace:", targetNS2.Path())
 
 				// Start an echo server and get the port
-				containerPort, session2 := StartEchoServerInNamespace(targetNS2)
+				containerPort, session2, err := StartEchoServerInNamespace(targetNS2)
+				Expect(err).NotTo(HaveOccurred())
 
 				runtimeConfig2 := libcni.RuntimeConf{
 					ContainerID: fmt.Sprintf("unit-test2-%d", hostPort),
@@ -418,7 +421,7 @@ var _ = Describe("portmap integration tests", func() {
 				}
 
 				close(done)
-			})
+			}, TIMEOUT*9)
 		})
 	}
 })

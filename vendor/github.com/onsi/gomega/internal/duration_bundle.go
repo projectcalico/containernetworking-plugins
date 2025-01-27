@@ -8,11 +8,10 @@ import (
 )
 
 type DurationBundle struct {
-	EventuallyTimeout                       time.Duration
-	EventuallyPollingInterval               time.Duration
-	ConsistentlyDuration                    time.Duration
-	ConsistentlyPollingInterval             time.Duration
-	EnforceDefaultTimeoutsWhenUsingContexts bool
+	EventuallyTimeout           time.Duration
+	EventuallyPollingInterval   time.Duration
+	ConsistentlyDuration        time.Duration
+	ConsistentlyPollingInterval time.Duration
 }
 
 const (
@@ -21,19 +20,15 @@ const (
 
 	ConsistentlyDurationEnvVarName        = "GOMEGA_DEFAULT_CONSISTENTLY_DURATION"
 	ConsistentlyPollingIntervalEnvVarName = "GOMEGA_DEFAULT_CONSISTENTLY_POLLING_INTERVAL"
-
-	EnforceDefaultTimeoutsWhenUsingContextsEnvVarName = "GOMEGA_ENFORCE_DEFAULT_TIMEOUTS_WHEN_USING_CONTEXTS"
 )
 
 func FetchDefaultDurationBundle() DurationBundle {
-	_, EnforceDefaultTimeoutsWhenUsingContexts := os.LookupEnv(EnforceDefaultTimeoutsWhenUsingContextsEnvVarName)
 	return DurationBundle{
 		EventuallyTimeout:         durationFromEnv(EventuallyTimeoutEnvVarName, time.Second),
 		EventuallyPollingInterval: durationFromEnv(EventuallyPollingIntervalEnvVarName, 10*time.Millisecond),
 
-		ConsistentlyDuration:                    durationFromEnv(ConsistentlyDurationEnvVarName, 100*time.Millisecond),
-		ConsistentlyPollingInterval:             durationFromEnv(ConsistentlyPollingIntervalEnvVarName, 10*time.Millisecond),
-		EnforceDefaultTimeoutsWhenUsingContexts: EnforceDefaultTimeoutsWhenUsingContexts,
+		ConsistentlyDuration:        durationFromEnv(ConsistentlyDurationEnvVarName, 100*time.Millisecond),
+		ConsistentlyPollingInterval: durationFromEnv(ConsistentlyPollingIntervalEnvVarName, 10*time.Millisecond),
 	}
 }
 
@@ -49,28 +44,28 @@ func durationFromEnv(key string, defaultDuration time.Duration) time.Duration {
 	return duration
 }
 
-func toDuration(input interface{}) (time.Duration, error) {
+func toDuration(input interface{}) time.Duration {
 	duration, ok := input.(time.Duration)
 	if ok {
-		return duration, nil
+		return duration
 	}
 
 	value := reflect.ValueOf(input)
 	kind := reflect.TypeOf(input).Kind()
 
 	if reflect.Int <= kind && kind <= reflect.Int64 {
-		return time.Duration(value.Int()) * time.Second, nil
+		return time.Duration(value.Int()) * time.Second
 	} else if reflect.Uint <= kind && kind <= reflect.Uint64 {
-		return time.Duration(value.Uint()) * time.Second, nil
+		return time.Duration(value.Uint()) * time.Second
 	} else if reflect.Float32 <= kind && kind <= reflect.Float64 {
-		return time.Duration(value.Float() * float64(time.Second)), nil
+		return time.Duration(value.Float() * float64(time.Second))
 	} else if reflect.String == kind {
 		duration, err := time.ParseDuration(value.String())
 		if err != nil {
-			return 0, fmt.Errorf("%#v is not a valid parsable duration string: %w", input, err)
+			panic(fmt.Sprintf("%#v is not a valid parsable duration string.", input))
 		}
-		return duration, nil
+		return duration
 	}
 
-	return 0, fmt.Errorf("%#v is not a valid interval. Must be a time.Duration, a parsable duration string, or a number.", input)
+	panic(fmt.Sprintf("%v is not a valid interval.  Must be time.Duration, parsable duration string or a number.", input))
 }

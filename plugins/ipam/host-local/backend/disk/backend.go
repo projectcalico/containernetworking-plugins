@@ -15,6 +15,7 @@
 package disk
 
 import (
+	"io/ioutil"
 	"net"
 	"os"
 	"path/filepath"
@@ -24,10 +25,8 @@ import (
 	"github.com/containernetworking/plugins/plugins/ipam/host-local/backend"
 )
 
-const (
-	lastIPFilePrefix = "last_reserved_ip."
-	LineBreak        = "\r\n"
-)
+const lastIPFilePrefix = "last_reserved_ip."
+const LineBreak = "\r\n"
 
 var defaultDataDir = "/var/lib/cni/networks"
 
@@ -46,7 +45,7 @@ func New(network, dataDir string) (*Store, error) {
 		dataDir = defaultDataDir
 	}
 	dir := filepath.Join(dataDir, network)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, err
 	}
 
@@ -60,7 +59,7 @@ func New(network, dataDir string) (*Store, error) {
 func (s *Store) Reserve(id string, ifname string, ip net.IP, rangeID string) (bool, error) {
 	fname := GetEscapedPath(s.dataDir, ip.String())
 
-	f, err := os.OpenFile(fname, os.O_RDWR|os.O_EXCL|os.O_CREATE, 0o600)
+	f, err := os.OpenFile(fname, os.O_RDWR|os.O_EXCL|os.O_CREATE, 0644)
 	if os.IsExist(err) {
 		return false, nil
 	}
@@ -78,7 +77,7 @@ func (s *Store) Reserve(id string, ifname string, ip net.IP, rangeID string) (bo
 	}
 	// store the reserved ip in lastIPFile
 	ipfile := GetEscapedPath(s.dataDir, lastIPFilePrefix+rangeID)
-	err = os.WriteFile(ipfile, []byte(ip.String()), 0o600)
+	err = ioutil.WriteFile(ipfile, []byte(ip.String()), 0644)
 	if err != nil {
 		return false, err
 	}
@@ -88,21 +87,25 @@ func (s *Store) Reserve(id string, ifname string, ip net.IP, rangeID string) (bo
 // LastReservedIP returns the last reserved IP if exists
 func (s *Store) LastReservedIP(rangeID string) (net.IP, error) {
 	ipfile := GetEscapedPath(s.dataDir, lastIPFilePrefix+rangeID)
-	data, err := os.ReadFile(ipfile)
+	data, err := ioutil.ReadFile(ipfile)
 	if err != nil {
 		return nil, err
 	}
 	return net.ParseIP(string(data)), nil
 }
 
-func (s *Store) FindByKey(match string) (bool, error) {
+func (s *Store) Release(ip net.IP) error {
+	return os.Remove(GetEscapedPath(s.dataDir, ip.String()))
+}
+
+func (s *Store) FindByKey(id string, ifname string, match string) (bool, error) {
 	found := false
 
 	err := filepath.Walk(s.dataDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return nil
 		}
-		data, err := os.ReadFile(path)
+		data, err := ioutil.ReadFile(path)
 		if err != nil {
 			return nil
 		}
@@ -112,31 +115,33 @@ func (s *Store) FindByKey(match string) (bool, error) {
 		return nil
 	})
 	return found, err
+
 }
 
 func (s *Store) FindByID(id string, ifname string) bool {
 	s.Lock()
 	defer s.Unlock()
 
+	found := false
 	match := strings.TrimSpace(id) + LineBreak + ifname
-	found, err := s.FindByKey(match)
+	found, err := s.FindByKey(id, ifname, match)
 
 	// Match anything created by this id
 	if !found && err == nil {
 		match := strings.TrimSpace(id)
-		found, _ = s.FindByKey(match)
+		found, err = s.FindByKey(id, ifname, match)
 	}
 
 	return found
 }
 
-func (s *Store) ReleaseByKey(match string) (bool, error) {
+func (s *Store) ReleaseByKey(id string, ifname string, match string) (bool, error) {
 	found := false
 	err := filepath.Walk(s.dataDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return nil
 		}
-		data, err := os.ReadFile(path)
+		data, err := ioutil.ReadFile(path)
 		if err != nil {
 			return nil
 		}
@@ -149,18 +154,20 @@ func (s *Store) ReleaseByKey(match string) (bool, error) {
 		return nil
 	})
 	return found, err
+
 }
 
 // N.B. This function eats errors to be tolerant and
 // release as much as possible
 func (s *Store) ReleaseByID(id string, ifname string) error {
+	found := false
 	match := strings.TrimSpace(id) + LineBreak + ifname
-	found, err := s.ReleaseByKey(match)
+	found, err := s.ReleaseByKey(id, ifname, match)
 
 	// For backwards compatibility, look for files written by a previous version
 	if !found && err == nil {
 		match := strings.TrimSpace(id)
-		_, err = s.ReleaseByKey(match)
+		found, err = s.ReleaseByKey(id, ifname, match)
 	}
 	return err
 }
@@ -178,7 +185,7 @@ func (s *Store) GetByID(id string, ifname string) []net.IP {
 		if err != nil || info.IsDir() {
 			return nil
 		}
-		data, err := os.ReadFile(path)
+		data, err := ioutil.ReadFile(path)
 		if err != nil {
 			return nil
 		}
@@ -196,7 +203,7 @@ func (s *Store) GetByID(id string, ifname string) []net.IP {
 
 func GetEscapedPath(dataDir string, fname string) string {
 	if runtime.GOOS == "windows" {
-		fname = strings.ReplaceAll(fname, ":", "_")
+		fname = strings.Replace(fname, ":", "_", -1)
 	}
 	return filepath.Join(dataDir, fname)
 }

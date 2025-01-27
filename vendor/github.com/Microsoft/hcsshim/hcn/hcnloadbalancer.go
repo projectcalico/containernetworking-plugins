@@ -1,5 +1,3 @@
-//go:build windows
-
 package hcn
 
 import (
@@ -30,14 +28,14 @@ type HostComputeLoadBalancer struct {
 	Flags                LoadBalancerFlags         `json:",omitempty"` // 0: None, 1: EnableDirectServerReturn
 }
 
-// LoadBalancerFlags modify settings for a loadbalancer.
+//LoadBalancerFlags modify settings for a loadbalancer.
 type LoadBalancerFlags uint32
 
 var (
 	// LoadBalancerFlagsNone is the default.
 	LoadBalancerFlagsNone LoadBalancerFlags = 0
 	// LoadBalancerFlagsDSR enables Direct Server Return (DSR)
-	LoadBalancerFlagsDSR  LoadBalancerFlags = 1
+	LoadBalancerFlagsDSR LoadBalancerFlags = 1
 	LoadBalancerFlagsIPv6 LoadBalancerFlags = 2
 )
 
@@ -69,14 +67,14 @@ var (
 	LoadBalancerDistributionSourceIP LoadBalancerDistribution = 2
 )
 
-func getLoadBalancer(loadBalancerGUID guid.GUID, query string) (*HostComputeLoadBalancer, error) {
+func getLoadBalancer(loadBalancerGuid guid.GUID, query string) (*HostComputeLoadBalancer, error) {
 	// Open loadBalancer.
 	var (
 		loadBalancerHandle hcnLoadBalancer
 		resultBuffer       *uint16
 		propertiesBuffer   *uint16
 	)
-	hr := hcnOpenLoadBalancer(&loadBalancerGUID, &loadBalancerHandle, &resultBuffer)
+	hr := hcnOpenLoadBalancer(&loadBalancerGuid, &loadBalancerHandle, &resultBuffer)
 	if err := checkForErrors("hcnOpenLoadBalancer", hr, resultBuffer); err != nil {
 		return nil, err
 	}
@@ -117,8 +115,8 @@ func enumerateLoadBalancers(query string) ([]HostComputeLoadBalancer, error) {
 	}
 
 	var outputLoadBalancers []HostComputeLoadBalancer
-	for _, loadBalancerGUID := range loadBalancerIds {
-		loadBalancer, err := getLoadBalancer(loadBalancerGUID, query)
+	for _, loadBalancerGuid := range loadBalancerIds {
+		loadBalancer, err := getLoadBalancer(loadBalancerGuid, query)
 		if err != nil {
 			return nil, err
 		}
@@ -134,8 +132,8 @@ func createLoadBalancer(settings string) (*HostComputeLoadBalancer, error) {
 		resultBuffer       *uint16
 		propertiesBuffer   *uint16
 	)
-	loadBalancerGUID := guid.GUID{}
-	hr := hcnCreateLoadBalancer(&loadBalancerGUID, settings, &loadBalancerHandle, &resultBuffer)
+	loadBalancerGuid := guid.GUID{}
+	hr := hcnCreateLoadBalancer(&loadBalancerGuid, settings, &loadBalancerHandle, &resultBuffer)
 	if err := checkForErrors("hcnCreateLoadBalancer", hr, resultBuffer); err != nil {
 		return nil, err
 	}
@@ -163,56 +161,13 @@ func createLoadBalancer(settings string) (*HostComputeLoadBalancer, error) {
 	return &outputLoadBalancer, nil
 }
 
-func updateLoadBalancer(loadbalancerId string, settings string) (*HostComputeLoadBalancer, error) {
-	loadBalancerGuid, err := guid.FromString(loadbalancerId)
-	if err != nil {
-		return nil, errInvalidLoadBalancerID
-	}
-	// Update loadBalancer.
-	var (
-		loadBalancerHandle hcnLoadBalancer
-		resultBuffer       *uint16
-		propertiesBuffer   *uint16
-	)
-	hr := hcnOpenLoadBalancer(&loadBalancerGuid, &loadBalancerHandle, &resultBuffer)
-	if err := checkForErrors("hcnOpenLoadBalancer", hr, resultBuffer); err != nil {
-		return nil, err
-	}
-	hr = hcnModifyLoadBalancer(loadBalancerHandle, settings, &resultBuffer)
-	if err := checkForErrors("hcnModifyLoadBalancer", hr, resultBuffer); err != nil {
-		return nil, err
-	}
-	// Query loadBalancer.
-	hcnQuery := defaultQuery()
-	query, err := json.Marshal(hcnQuery)
-	if err != nil {
-		return nil, err
-	}
-	hr = hcnQueryLoadBalancerProperties(loadBalancerHandle, string(query), &propertiesBuffer, &resultBuffer)
-	if err := checkForErrors("hcnQueryLoadBalancerProperties", hr, resultBuffer); err != nil {
-		return nil, err
-	}
-	properties := interop.ConvertAndFreeCoTaskMemString(propertiesBuffer)
-	// Close loadBalancer.
-	hr = hcnCloseLoadBalancer(loadBalancerHandle)
-	if err := checkForErrors("hcnCloseLoadBalancer", hr, nil); err != nil {
-		return nil, err
-	}
-	// Convert output to HostComputeLoadBalancer
-	var outputLoadBalancer HostComputeLoadBalancer
-	if err := json.Unmarshal([]byte(properties), &outputLoadBalancer); err != nil {
-		return nil, err
-	}
-	return &outputLoadBalancer, nil
-}
-
-func deleteLoadBalancer(loadBalancerID string) error {
-	loadBalancerGUID, err := guid.FromString(loadBalancerID)
+func deleteLoadBalancer(loadBalancerId string) error {
+	loadBalancerGuid, err := guid.FromString(loadBalancerId)
 	if err != nil {
 		return errInvalidLoadBalancerID
 	}
 	var resultBuffer *uint16
-	hr := hcnDeleteLoadBalancer(&loadBalancerGUID, &resultBuffer)
+	hr := hcnDeleteLoadBalancer(&loadBalancerGuid, &resultBuffer)
 	if err := checkForErrors("hcnDeleteLoadBalancer", hr, resultBuffer); err != nil {
 		return err
 	}
@@ -231,12 +186,12 @@ func ListLoadBalancers() ([]HostComputeLoadBalancer, error) {
 
 // ListLoadBalancersQuery makes a call to query the list of available loadBalancers.
 func ListLoadBalancersQuery(query HostComputeQuery) ([]HostComputeLoadBalancer, error) {
-	queryJSON, err := json.Marshal(query)
+	queryJson, err := json.Marshal(query)
 	if err != nil {
 		return nil, err
 	}
 
-	loadBalancers, err := enumerateLoadBalancers(string(queryJSON))
+	loadBalancers, err := enumerateLoadBalancers(string(queryJson))
 	if err != nil {
 		return nil, err
 	}
@@ -244,9 +199,9 @@ func ListLoadBalancersQuery(query HostComputeQuery) ([]HostComputeLoadBalancer, 
 }
 
 // GetLoadBalancerByID returns the LoadBalancer specified by Id.
-func GetLoadBalancerByID(loadBalancerID string) (*HostComputeLoadBalancer, error) {
+func GetLoadBalancerByID(loadBalancerId string) (*HostComputeLoadBalancer, error) {
 	hcnQuery := defaultQuery()
-	mapA := map[string]string{"ID": loadBalancerID}
+	mapA := map[string]string{"ID": loadBalancerId}
 	filter, err := json.Marshal(mapA)
 	if err != nil {
 		return nil, err
@@ -258,7 +213,7 @@ func GetLoadBalancerByID(loadBalancerID string) (*HostComputeLoadBalancer, error
 		return nil, err
 	}
 	if len(loadBalancers) == 0 {
-		return nil, LoadBalancerNotFoundError{LoadBalancerId: loadBalancerID}
+		return nil, LoadBalancerNotFoundError{LoadBalancerId: loadBalancerId}
 	}
 	return &loadBalancers[0], err
 }
@@ -274,23 +229,6 @@ func (loadBalancer *HostComputeLoadBalancer) Create() (*HostComputeLoadBalancer,
 
 	logrus.Debugf("hcn::HostComputeLoadBalancer::Create JSON: %s", jsonString)
 	loadBalancer, hcnErr := createLoadBalancer(string(jsonString))
-	if hcnErr != nil {
-		return nil, hcnErr
-	}
-	return loadBalancer, nil
-}
-
-// Update Loadbalancer.
-func (loadBalancer *HostComputeLoadBalancer) Update(hnsLoadbalancerID string) (*HostComputeLoadBalancer, error) {
-	logrus.Debugf("hcn::HostComputeLoadBalancer::Create id=%s", hnsLoadbalancerID)
-
-	jsonString, err := json.Marshal(loadBalancer)
-	if err != nil {
-		return nil, err
-	}
-
-	logrus.Debugf("hcn::HostComputeLoadBalancer::Update JSON: %s", jsonString)
-	loadBalancer, hcnErr := updateLoadBalancer(hnsLoadbalancerID, string(jsonString))
 	if hcnErr != nil {
 		return nil, hcnErr
 	}

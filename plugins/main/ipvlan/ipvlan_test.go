@@ -17,29 +17,28 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"net"
 	"os"
 	"strings"
 	"syscall"
 
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
-	"github.com/vishvananda/netlink"
-
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
-	types020 "github.com/containernetworking/cni/pkg/types/020"
-	types040 "github.com/containernetworking/cni/pkg/types/040"
-	types100 "github.com/containernetworking/cni/pkg/types/100"
+	"github.com/containernetworking/cni/pkg/types/020"
+	"github.com/containernetworking/cni/pkg/types/040"
+	"github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/containernetworking/plugins/pkg/testutils"
+
+	"github.com/vishvananda/netlink"
+
 	"github.com/containernetworking/plugins/plugins/ipam/host-local/backend/allocator"
+	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/gomega"
 )
 
-const (
-	MASTER_NAME             = "eth0"
-	MASTER_NAME_INCONTAINER = "eth1"
-)
+const MASTER_NAME = "eth0"
 
 type Net struct {
 	Name          string                 `json:"name"`
@@ -51,7 +50,6 @@ type Net struct {
 	DNS           types.DNS              `json:"dns"`
 	RawPrevResult map[string]interface{} `json:"prevResult,omitempty"`
 	PrevResult    types100.Result        `json:"-"`
-	LinkContNs    bool                   `json:"linkInContainer"`
 }
 
 func buildOneConfig(cniVersion string, master string, orig *Net, prevResult types.Result) (*Net, error) {
@@ -93,6 +91,7 @@ func buildOneConfig(cniVersion string, master string, orig *Net, prevResult type
 	}
 
 	return conf, nil
+
 }
 
 func ipvlanAddCheckDelTest(conf, masterName string, originalNS, targetNS ns.NetNS) {
@@ -113,13 +112,6 @@ func ipvlanAddCheckDelTest(conf, masterName string, originalNS, targetNS ns.NetN
 	var macAddress string
 	err = originalNS.Do(func(ns.NetNS) error {
 		defer GinkgoRecover()
-
-		if testutils.SpecVersionHasSTATUS(cniVersion) {
-			err = testutils.CmdStatus(func() error {
-				return cmdStatus(args)
-			})
-			Expect(err).NotTo(HaveOccurred())
-		}
 
 		result, _, err = testutils.CmdAddWithArgs(args, func() error {
 			return cmdAdd(args)
@@ -148,7 +140,7 @@ func ipvlanAddCheckDelTest(conf, masterName string, originalNS, targetNS ns.NetN
 
 		addrs, err := netlink.AddrList(link, syscall.AF_INET)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(addrs).To(HaveLen(1))
+		Expect(len(addrs)).To(Equal(1))
 		return nil
 	})
 	Expect(err).NotTo(HaveOccurred())
@@ -213,15 +205,13 @@ type tester interface {
 
 type testerBase struct{}
 
-type (
-	testerV10x testerBase
-	testerV04x testerBase
-	testerV02x testerBase
-)
+type testerV10x testerBase
+type testerV04x testerBase
+type testerV02x testerBase
 
 func newTesterByVersion(version string) tester {
 	switch {
-	case strings.HasPrefix(version, "1."):
+	case strings.HasPrefix(version, "1.0."):
 		return &testerV10x{}
 	case strings.HasPrefix(version, "0.4.") || strings.HasPrefix(version, "0.3."):
 		return &testerV04x{}
@@ -237,9 +227,9 @@ func (t *testerV10x) verifyResult(result types.Result, name string) string {
 	r, err := types100.GetResult(result)
 	Expect(err).NotTo(HaveOccurred())
 
-	Expect(r.Interfaces).To(HaveLen(1))
+	Expect(len(r.Interfaces)).To(Equal(1))
 	Expect(r.Interfaces[0].Name).To(Equal(name))
-	Expect(r.IPs).To(HaveLen(1))
+	Expect(len(r.IPs)).To(Equal(1))
 
 	return r.Interfaces[0].Mac
 }
@@ -249,15 +239,15 @@ func (t *testerV04x) verifyResult(result types.Result, name string) string {
 	r, err := types040.GetResult(result)
 	Expect(err).NotTo(HaveOccurred())
 
-	Expect(r.Interfaces).To(HaveLen(1))
+	Expect(len(r.Interfaces)).To(Equal(1))
 	Expect(r.Interfaces[0].Name).To(Equal(name))
-	Expect(r.IPs).To(HaveLen(1))
+	Expect(len(r.IPs)).To(Equal(1))
 
 	return r.Interfaces[0].Mac
 }
 
 // verifyResult minimally verifies the Result and returns the interface's MAC address
-func (t *testerV02x) verifyResult(result types.Result, _ string) string {
+func (t *testerV02x) verifyResult(result types.Result, name string) string {
 	r, err := types020.GetResult(result)
 	Expect(err).NotTo(HaveOccurred())
 
@@ -282,36 +272,20 @@ var _ = Describe("ipvlan Operations", func() {
 		targetNS, err = testutils.NewNS()
 		Expect(err).NotTo(HaveOccurred())
 
-		dataDir, err = os.MkdirTemp("", "ipvlan_test")
+		dataDir, err = ioutil.TempDir("", "ipvlan_test")
 		Expect(err).NotTo(HaveOccurred())
 
 		err = originalNS.Do(func(ns.NetNS) error {
 			defer GinkgoRecover()
 
-			linkAttrs := netlink.NewLinkAttrs()
-			linkAttrs.Name = MASTER_NAME
 			// Add master
 			err = netlink.LinkAdd(&netlink.Dummy{
-				LinkAttrs: linkAttrs,
+				LinkAttrs: netlink.LinkAttrs{
+					Name: MASTER_NAME,
+				},
 			})
 			Expect(err).NotTo(HaveOccurred())
 			_, err = netlink.LinkByName(MASTER_NAME)
-			Expect(err).NotTo(HaveOccurred())
-			return nil
-		})
-		Expect(err).NotTo(HaveOccurred())
-
-		err = targetNS.Do(func(ns.NetNS) error {
-			defer GinkgoRecover()
-
-			linkAttrs := netlink.NewLinkAttrs()
-			linkAttrs.Name = MASTER_NAME_INCONTAINER
-			// Add master
-			err = netlink.LinkAdd(&netlink.Dummy{
-				LinkAttrs: linkAttrs,
-			})
-			Expect(err).NotTo(HaveOccurred())
-			_, err = netlink.LinkByName(MASTER_NAME_INCONTAINER)
 			Expect(err).NotTo(HaveOccurred())
 			return nil
 		})
@@ -328,77 +302,67 @@ var _ = Describe("ipvlan Operations", func() {
 		Expect(testutils.UnmountNS(targetNS)).To(Succeed())
 	})
 
-	for _, inContainer := range []bool{false, true} {
-		masterInterface := MASTER_NAME
-		if inContainer {
-			masterInterface = MASTER_NAME_INCONTAINER
-		}
-		// for _, ver := range testutils.AllSpecVersions {
-		for _, ver := range [...]string{"1.0.0"} {
-			// Redefine ver inside for scope so real value is picked up by each dynamically defined It()
-			// See Gingkgo's "Patterns for dynamically generating tests" documentation.
-			ver := ver
-			isInContainer := inContainer // Tests need a local var with constant value
+	for _, ver := range testutils.AllSpecVersions {
+		// Redefine ver inside for scope so real value is picked up by each dynamically defined It()
+		// See Gingkgo's "Patterns for dynamically generating tests" documentation.
+		ver := ver
 
-			It(fmt.Sprintf("[%s] creates an ipvlan link in a non-default namespace", ver), func() {
-				conf := &NetConf{
-					NetConf: types.NetConf{
-						CNIVersion: ver,
-						Name:       "testConfig",
-						Type:       "ipvlan",
-					},
-					Master:     masterInterface,
-					Mode:       "l2",
-					MTU:        1500,
-					LinkContNs: isInContainer,
-				}
+		It(fmt.Sprintf("[%s] creates an ipvlan link in a non-default namespace", ver), func() {
+			conf := &NetConf{
+				NetConf: types.NetConf{
+					CNIVersion: ver,
+					Name:       "testConfig",
+					Type:       "ipvlan",
+				},
+				Master: MASTER_NAME,
+				Mode:   "l2",
+				MTU:    1500,
+			}
 
-				err := originalNS.Do(func(ns.NetNS) error {
-					defer GinkgoRecover()
+			err := originalNS.Do(func(ns.NetNS) error {
+				defer GinkgoRecover()
 
-					_, err := createIpvlan(conf, "foobar0", targetNS)
-					Expect(err).NotTo(HaveOccurred())
-					return nil
-				})
-
+				_, err := createIpvlan(conf, "foobar0", targetNS)
 				Expect(err).NotTo(HaveOccurred())
-
-				// Make sure ipvlan link exists in the target namespace
-				err = targetNS.Do(func(ns.NetNS) error {
-					defer GinkgoRecover()
-
-					link, err := netlink.LinkByName("foobar0")
-					Expect(err).NotTo(HaveOccurred())
-					Expect(link.Attrs().Name).To(Equal("foobar0"))
-					return nil
-				})
-				Expect(err).NotTo(HaveOccurred())
+				return nil
 			})
 
-			It(fmt.Sprintf("[%s] configures and deconfigures an iplvan link with ADD/DEL", ver), func() {
-				conf := fmt.Sprintf(`{
+			Expect(err).NotTo(HaveOccurred())
+
+			// Make sure ipvlan link exists in the target namespace
+			err = targetNS.Do(func(ns.NetNS) error {
+				defer GinkgoRecover()
+
+				link, err := netlink.LinkByName("foobar0")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(link.Attrs().Name).To(Equal("foobar0"))
+				return nil
+			})
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It(fmt.Sprintf("[%s] configures and deconfigures an iplvan link with ADD/DEL", ver), func() {
+			conf := fmt.Sprintf(`{
 			    "cniVersion": "%s",
 			    "name": "mynet",
 			    "type": "ipvlan",
 			    "master": "%s",
-				"linkInContainer": %t,
 			    "ipam": {
 				"type": "host-local",
 				"subnet": "10.1.2.0/24",
 				"dataDir": "%s"
 			    }
-			}`, ver, masterInterface, isInContainer, dataDir)
+			}`, ver, MASTER_NAME, dataDir)
 
-				ipvlanAddCheckDelTest(conf, "", originalNS, targetNS)
-			})
+			ipvlanAddCheckDelTest(conf, "", originalNS, targetNS)
+		})
 
-			if testutils.SpecVersionHasChaining(ver) {
-				It(fmt.Sprintf("[%s] configures and deconfigures an iplvan link with ADD/DEL when chained", ver), func() {
-					conf := fmt.Sprintf(`{
+		if testutils.SpecVersionHasChaining(ver) {
+			It(fmt.Sprintf("[%s] configures and deconfigures an iplvan link with ADD/DEL when chained", ver), func() {
+				conf := fmt.Sprintf(`{
 				    "cniVersion": "%s",
 				    "name": "mynet",
 				    "type": "ipvlan",
-					"linkInContainer": %t,
 				    "prevResult": {
 					    "interfaces": [
 						    {
@@ -415,91 +379,84 @@ var _ = Describe("ipvlan Operations", func() {
 					    ],
 					    "routes": []
 				    }
-				}`, ver, isInContainer, masterInterface)
+				}`, ver, MASTER_NAME)
 
-					ipvlanAddCheckDelTest(conf, masterInterface, originalNS, targetNS)
-				})
-			}
+				ipvlanAddCheckDelTest(conf, MASTER_NAME, originalNS, targetNS)
+			})
+		}
 
-			It(fmt.Sprintf("[%s] deconfigures an unconfigured ipvlan link with DEL", ver), func() {
-				conf := fmt.Sprintf(`{
+		It(fmt.Sprintf("[%s] deconfigures an unconfigured ipvlan link with DEL", ver), func() {
+			conf := fmt.Sprintf(`{
 			    "cniVersion": "%s",
 			    "name": "mynet",
 			    "type": "ipvlan",
 			    "master": "%s",
-				"linkInContainer": %t,
 			    "ipam": {
 				"type": "host-local",
 				"subnet": "10.1.2.0/24",
 				"dataDir": "%s"
 			    }
-			}`, ver, masterInterface, isInContainer, dataDir)
+			}`, ver, MASTER_NAME, dataDir)
 
-				args := &skel.CmdArgs{
-					ContainerID: "dummy",
-					Netns:       targetNS.Path(),
-					IfName:      "ipvl0",
-					StdinData:   []byte(conf),
-				}
+			args := &skel.CmdArgs{
+				ContainerID: "dummy",
+				Netns:       targetNS.Path(),
+				IfName:      "ipvl0",
+				StdinData:   []byte(conf),
+			}
 
-				err := originalNS.Do(func(ns.NetNS) error {
-					defer GinkgoRecover()
+			err := originalNS.Do(func(ns.NetNS) error {
+				defer GinkgoRecover()
 
-					err := testutils.CmdDelWithArgs(args, func() error {
-						return cmdDel(args)
-					})
-					Expect(err).NotTo(HaveOccurred())
-					return nil
+				err := testutils.CmdDelWithArgs(args, func() error {
+					return cmdDel(args)
 				})
 				Expect(err).NotTo(HaveOccurred())
+				return nil
 			})
+			Expect(err).NotTo(HaveOccurred())
+		})
 
-			It(fmt.Sprintf("[%s] configures and deconfigures a ipvlan link with ADD/DEL, without master config", ver), func() {
-				conf := fmt.Sprintf(`{
+		It(fmt.Sprintf("[%s] configures and deconfigures a ipvlan link with ADD/DEL, without master config", ver), func() {
+			conf := fmt.Sprintf(`{
 			    "cniVersion": "%s",
 			    "name": "mynet",
 			    "type": "ipvlan",
-				"linkInContainer": %t,
 			    "ipam": {
 				"type": "host-local",
 				"subnet": "10.1.2.0/24",
 				"dataDir": "%s"
 			    }
-			}`, ver, isInContainer, dataDir)
+			}`, ver, dataDir)
 
-				// Make MASTER_NAME as default route interface
-				currentNs := originalNS
-				if isInContainer {
-					currentNs = targetNS
-				}
-				err := currentNs.Do(func(ns.NetNS) error {
-					defer GinkgoRecover()
+			// Make MASTER_NAME as default route interface
+			err := originalNS.Do(func(ns.NetNS) error {
+				defer GinkgoRecover()
 
-					link, err := netlink.LinkByName(masterInterface)
-					Expect(err).NotTo(HaveOccurred())
-					err = netlink.LinkSetUp(link)
-					Expect(err).NotTo(HaveOccurred())
-
-					address := &net.IPNet{IP: net.IPv4(192, 0, 0, 1), Mask: net.CIDRMask(24, 32)}
-					addr := &netlink.Addr{IPNet: address}
-					err = netlink.AddrAdd(link, addr)
-					Expect(err).NotTo(HaveOccurred())
-
-					// add default gateway into MASTER
-					dst := &net.IPNet{
-						IP:   net.IPv4(0, 0, 0, 0),
-						Mask: net.CIDRMask(0, 0),
-					}
-					ip := net.IPv4(192, 0, 0, 254)
-					route := netlink.Route{LinkIndex: link.Attrs().Index, Dst: dst, Gw: ip}
-					err = netlink.RouteAdd(&route)
-					Expect(err).NotTo(HaveOccurred())
-					return nil
-				})
+				link, err := netlink.LinkByName(MASTER_NAME)
+				Expect(err).NotTo(HaveOccurred())
+				err = netlink.LinkSetUp(link)
 				Expect(err).NotTo(HaveOccurred())
 
-				ipvlanAddCheckDelTest(conf, masterInterface, originalNS, targetNS)
+				var address = &net.IPNet{IP: net.IPv4(192, 0, 0, 1), Mask: net.CIDRMask(24, 32)}
+				var addr = &netlink.Addr{IPNet: address}
+				err = netlink.AddrAdd(link, addr)
+				Expect(err).NotTo(HaveOccurred())
+
+				// add default gateway into MASTER
+				dst := &net.IPNet{
+					IP:   net.IPv4(0, 0, 0, 0),
+					Mask: net.CIDRMask(0, 0),
+				}
+				ip := net.IPv4(192, 0, 0, 254)
+				route := netlink.Route{LinkIndex: link.Attrs().Index, Dst: dst, Gw: ip}
+				err = netlink.RouteAdd(&route)
+				Expect(err).NotTo(HaveOccurred())
+				return nil
 			})
-		}
+			Expect(err).NotTo(HaveOccurred())
+
+			ipvlanAddCheckDelTest(conf, MASTER_NAME, originalNS, targetNS)
+		})
 	}
 })

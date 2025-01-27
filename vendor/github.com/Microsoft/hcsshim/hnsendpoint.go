@@ -1,5 +1,3 @@
-//go:build windows
-
 package hcsshim
 
 import (
@@ -9,13 +7,10 @@ import (
 // HNSEndpoint represents a network endpoint in HNS
 type HNSEndpoint = hns.HNSEndpoint
 
-// HNSEndpointStats represent the stats for an networkendpoint in HNS
-type HNSEndpointStats = hns.EndpointStats
-
 // Namespace represents a Compartment.
 type Namespace = hns.Namespace
 
-// SystemType represents the type of the system on which actions are done
+//SystemType represents the type of the system on which actions are done
 type SystemType string
 
 // SystemType const
@@ -112,9 +107,4 @@ func GetHNSEndpointByID(endpointID string) (*HNSEndpoint, error) {
 // GetHNSEndpointByName gets the endpoint filtered by Name
 func GetHNSEndpointByName(endpointName string) (*HNSEndpoint, error) {
 	return hns.GetHNSEndpointByName(endpointName)
-}
-
-// GetHNSEndpointStats gets the endpoint stats by ID
-func GetHNSEndpointStats(endpointName string) (*HNSEndpointStats, error) {
-	return hns.GetHNSEndpointStats(endpointName)
 }

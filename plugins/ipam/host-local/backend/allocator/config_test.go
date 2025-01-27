@@ -17,10 +17,9 @@ package allocator
 import (
 	"net"
 
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
-
 	"github.com/containernetworking/cni/pkg/types"
+	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/gomega"
 )
 
 var _ = Describe("IPAM config", func() {
@@ -416,6 +415,7 @@ var _ = Describe("IPAM config", func() {
 		}`
 		_, _, err := LoadIPAMConfig([]byte(input), "")
 		Expect(err).To(MatchError("invalid range set 0: mixed address families"))
+
 	})
 
 	It("Should should error on too many ranges", func() {

@@ -19,15 +19,15 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
+	"io/ioutil"
 	"net"
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"strings"
 
+	"github.com/j-keck/arping"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 
@@ -35,15 +35,12 @@ import (
 	"github.com/containernetworking/cni/pkg/types"
 	current "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/cni/pkg/version"
+
 	"github.com/containernetworking/plugins/pkg/ns"
 	bv "github.com/containernetworking/plugins/pkg/utils/buildversion"
 )
 
-const (
-	defaultDataDir       = "/run/cni/tuning"
-	defaultAllowlistDir  = "/etc/cni/tuning/"
-	defaultAllowlistFile = "allowlist.conf"
-)
+const defaultDataDir = "/run/cni/tuning"
 
 // TuningConf represents the network tuning configuration.
 type TuningConf struct {
@@ -53,7 +50,6 @@ type TuningConf struct {
 	Mac      string            `json:"mac,omitempty"`
 	Promisc  bool              `json:"promisc,omitempty"`
 	Mtu      int               `json:"mtu,omitempty"`
-	TxQLen   *int              `json:"txQLen,omitempty"`
 	Allmulti *bool             `json:"allmulti,omitempty"`
 
 	RuntimeConfig struct {
@@ -70,7 +66,6 @@ type IPAMArgs struct {
 	Promisc  *bool              `json:"promisc,omitempty"`
 	Mtu      *int               `json:"mtu,omitempty"`
 	Allmulti *bool              `json:"allmulti,omitempty"`
-	TxQLen   *int               `json:"txQLen,omitempty"`
 }
 
 // configToRestore will contain interface attributes that should be restored on cmdDel
@@ -79,7 +74,6 @@ type configToRestore struct {
 	Promisc  *bool  `json:"promisc,omitempty"`
 	Mtu      int    `json:"mtu,omitempty"`
 	Allmulti *bool  `json:"allmulti,omitempty"`
-	TxQLen   *int   `json:"txQLen,omitempty"`
 }
 
 // MacEnvArgs represents CNI_ARG
@@ -138,10 +132,6 @@ func parseConf(data []byte, envArgs string) (*TuningConf, error) {
 
 		if conf.Args.A.Allmulti != nil {
 			conf.Allmulti = conf.Args.A.Allmulti
-		}
-
-		if conf.Args.A.TxQLen != nil {
-			conf.TxQLen = conf.Args.A.TxQLen
 		}
 	}
 
@@ -211,14 +201,6 @@ func changeAllmulti(ifName string, val bool) error {
 	return netlink.LinkSetAllmulticastOff(link)
 }
 
-func changeTxQLen(ifName string, txQLen int) error {
-	link, err := netlink.LinkByName(ifName)
-	if err != nil {
-		return fmt.Errorf("failed to get %q: %v", ifName, err)
-	}
-	return netlink.LinkSetTxQLen(link, txQLen)
-}
-
 func createBackup(ifName, containerID, backupPath string, tuningConf *TuningConf) error {
 	config := configToRestore{}
 	link, err := netlink.LinkByName(ifName)
@@ -239,13 +221,9 @@ func createBackup(ifName, containerID, backupPath string, tuningConf *TuningConf
 		config.Allmulti = new(bool)
 		*config.Allmulti = (link.Attrs().RawFlags&unix.IFF_ALLMULTI != 0)
 	}
-	if tuningConf.TxQLen != nil {
-		qlen := link.Attrs().TxQLen
-		config.TxQLen = &qlen
-	}
 
 	if _, err := os.Stat(backupPath); os.IsNotExist(err) {
-		if err = os.MkdirAll(backupPath, 0o600); err != nil {
+		if err = os.MkdirAll(backupPath, 0600); err != nil {
 			return fmt.Errorf("failed to create backup directory: %v", err)
 		}
 	}
@@ -254,7 +232,7 @@ func createBackup(ifName, containerID, backupPath string, tuningConf *TuningConf
 	if err != nil {
 		return fmt.Errorf("failed to marshall data for %q: %v", ifName, err)
 	}
-	if err = os.WriteFile(path.Join(backupPath, containerID+"_"+ifName+".json"), data, 0o600); err != nil {
+	if err = ioutil.WriteFile(path.Join(backupPath, containerID+"_"+ifName+".json"), data, 0600); err != nil {
 		return fmt.Errorf("failed to save file %s.json: %v", ifName, err)
 	}
 
@@ -269,13 +247,13 @@ func restoreBackup(ifName, containerID, backupPath string) error {
 		return nil
 	}
 
-	file, err := os.ReadFile(filePath)
+	file, err := ioutil.ReadFile(filePath)
 	if err != nil {
 		return fmt.Errorf("failed to open file %q: %v", filePath, err)
 	}
 
 	config := configToRestore{}
-	if err = json.Unmarshal(file, &config); err != nil {
+	if err = json.Unmarshal([]byte(file), &config); err != nil {
 		return nil
 	}
 
@@ -311,15 +289,8 @@ func restoreBackup(ifName, containerID, backupPath string) error {
 		}
 	}
 
-	if config.TxQLen != nil {
-		if err = changeTxQLen(ifName, *config.TxQLen); err != nil {
-			err = fmt.Errorf("failed to restore transmit queue length: %v", err)
-			errStr = append(errStr, err.Error())
-		}
-	}
-
 	if len(errStr) > 0 {
-		return errors.New(strings.Join(errStr, "; "))
+		return fmt.Errorf(strings.Join(errStr, "; "))
 	}
 
 	if err = os.Remove(filePath); err != nil {
@@ -330,19 +301,8 @@ func restoreBackup(ifName, containerID, backupPath string) error {
 }
 
 func cmdAdd(args *skel.CmdArgs) error {
-	if err := validateSysctlConflictingKeys(args.StdinData); err != nil {
-		return err
-	}
 	tuningConf, err := parseConf(args.StdinData, args.Args)
 	if err != nil {
-		return err
-	}
-
-	if err = validateSysctlConf(tuningConf); err != nil {
-		return err
-	}
-
-	if err = validateArgs(args); err != nil {
 		return err
 	}
 
@@ -355,24 +315,36 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return err
 	}
 
+	result, err := current.NewResultFromResult(tuningConf.PrevResult)
+	if err != nil {
+		return err
+	}
+
 	// The directory /proc/sys/net is per network namespace. Enter in the
 	// network namespace before writing on it.
 
 	err = ns.WithNetNSPath(args.Netns, func(_ ns.NetNS) error {
 		for key, value := range tuningConf.SysCtl {
-			fileName, err := getSysctlFilename(key, args.IfName)
-			if err != nil {
-				return err
-			}
+			// If the key contains `IFNAME` - substitute it with args.IfName
+			// to allow setting sysctls on a particular interface, on which
+			// other operations (like mac/mtu setting) are performed
+			key = strings.Replace(key, "IFNAME", args.IfName, 1)
 
+			fileName := filepath.Join("/proc/sys", strings.Replace(key, ".", "/", -1))
+
+			// Refuse to modify sysctl parameters that don't belong
+			// to the network subsystem.
+			if !strings.HasPrefix(fileName, "/proc/sys/net/") {
+				return fmt.Errorf("invalid net sysctl key: %q", key)
+			}
 			content := []byte(value)
-			err = os.WriteFile(fileName, content, 0o644)
+			err := ioutil.WriteFile(fileName, content, 0644)
 			if err != nil {
 				return err
 			}
 		}
 
-		if tuningConf.Mac != "" || tuningConf.Mtu != 0 || tuningConf.Promisc || tuningConf.Allmulti != nil || tuningConf.TxQLen != nil {
+		if tuningConf.Mac != "" || tuningConf.Mtu != 0 || tuningConf.Promisc || tuningConf.Allmulti != nil {
 			if err = createBackup(args.IfName, args.ContainerID, tuningConf.DataDir, tuningConf); err != nil {
 				return err
 			}
@@ -383,10 +355,16 @@ func cmdAdd(args *skel.CmdArgs) error {
 				return err
 			}
 
+			for _, ipc := range result.IPs {
+				if ipc.Address.IP.To4() != nil {
+					_ = arping.GratuitousArpOverIfaceByName(ipc.Address.IP, args.IfName)
+				}
+			}
+
 			updateResultsMacAddr(tuningConf, args.IfName, tuningConf.Mac)
 		}
 
-		if tuningConf.Promisc {
+		if tuningConf.Promisc != false {
 			if err = changePromisc(args.IfName, true); err != nil {
 				return err
 			}
@@ -400,12 +378,6 @@ func cmdAdd(args *skel.CmdArgs) error {
 
 		if tuningConf.Allmulti != nil {
 			if err = changeAllmulti(args.IfName, *tuningConf.Allmulti); err != nil {
-				return err
-			}
-		}
-
-		if tuningConf.TxQLen != nil {
-			if err = changeTxQLen(args.IfName, *tuningConf.TxQLen); err != nil {
 				return err
 			}
 		}
@@ -433,19 +405,10 @@ func cmdDel(args *skel.CmdArgs) error {
 }
 
 func main() {
-	skel.PluginMainFuncs(skel.CNIFuncs{
-		Add:   cmdAdd,
-		Check: cmdCheck,
-		Del:   cmdDel,
-		/* FIXME GC */
-		/* FIXME Status */
-	}, version.All, bv.BuildString("tuning"))
+	skel.PluginMain(cmdAdd, cmdCheck, cmdDel, version.All, bv.BuildString("tuning"))
 }
 
 func cmdCheck(args *skel.CmdArgs) error {
-	if err := validateSysctlConflictingKeys(args.StdinData); err != nil {
-		return err
-	}
 	tuningConf, err := parseConf(args.StdinData, args.Args)
 	if err != nil {
 		return err
@@ -468,12 +431,9 @@ func cmdCheck(args *skel.CmdArgs) error {
 	err = ns.WithNetNSPath(args.Netns, func(_ ns.NetNS) error {
 		// Check each configured value vs what's currently in the container
 		for key, confValue := range tuningConf.SysCtl {
-			fileName, err := getSysctlFilename(key, args.IfName)
-			if err != nil {
-				return err
-			}
+			fileName := filepath.Join("/proc/sys", strings.Replace(key, ".", "/", -1))
 
-			contents, err := os.ReadFile(fileName)
+			contents, err := ioutil.ReadFile(fileName)
 			if err != nil {
 				return err
 			}
@@ -521,13 +481,6 @@ func cmdCheck(args *skel.CmdArgs) error {
 					args.IfName, tuningConf.Allmulti, allmulti)
 			}
 		}
-
-		if tuningConf.TxQLen != nil {
-			if *tuningConf.TxQLen != link.Attrs().TxQLen {
-				return fmt.Errorf("Error: Tuning configured Transmit Queue Length of %s is %d, current value is %d",
-					args.IfName, tuningConf.TxQLen, link.Attrs().TxQLen)
-			}
-		}
 		return nil
 	})
 	if err != nil {
@@ -535,109 +488,4 @@ func cmdCheck(args *skel.CmdArgs) error {
 	}
 
 	return nil
-}
-
-// Validate the sysctls in the tuning config are on the sysctl allowlist file.
-// Note that if the allowlist file is missing no validation takes place.
-func validateSysctlConf(tuningConf *TuningConf) error {
-	isPresent, allowlist, err := readAllowlist()
-	if err != nil {
-		return err
-	}
-	if !isPresent {
-		return nil
-	}
-	for sysctl := range tuningConf.SysCtl {
-		match, err := contains(sysctl, allowlist)
-		if err != nil {
-			return err
-		}
-		if !match {
-			return fmt.Errorf("Sysctl %s is not allowed. Only the following sysctls are allowed: %+v", sysctl, allowlist)
-		}
-	}
-	return nil
-}
-
-// Validate the allowList contains the given sysctl
-func contains(sysctl string, allowList []string) (bool, error) {
-	for _, allowListElement := range allowList {
-		match, err := regexp.MatchString(allowListElement, sysctl)
-		if err != nil {
-			return false, err
-		}
-		if match {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-// Read the systctl allowlist from file. Return info if the file is present and the read allowList if it is
-func readAllowlist() (bool, []string, error) {
-	if _, err := os.Stat(filepath.Join(defaultAllowlistDir, defaultAllowlistFile)); os.IsNotExist(err) {
-		return false, nil, nil
-	}
-	dat, err := os.ReadFile(filepath.Join(defaultAllowlistDir, defaultAllowlistFile))
-	if err != nil {
-		return false, nil, err
-	}
-
-	lines := strings.Split(string(dat), "\n")
-	allowList := []string{}
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if len(line) > 0 {
-			allowList = append(allowList, line)
-		}
-	}
-	return true, allowList, nil
-}
-
-type sysctlKey string
-
-type sysctlCheck struct {
-	SysCtl map[sysctlKey]string `json:"sysctl"`
-}
-
-var sysctlDuplicatesMap = map[sysctlKey]interface{}{}
-
-func (d *sysctlKey) UnmarshalText(data []byte) error {
-	key := sysctlKey(string(data))
-	if _, exists := sysctlDuplicatesMap[key]; exists {
-		return errors.New("duplicated sysctl keys are not allowed")
-	}
-	sysctlDuplicatesMap[key] = ""
-	return nil
-}
-
-func validateSysctlConflictingKeys(data []byte) error {
-	sysctlCheck := sysctlCheck{}
-	return json.Unmarshal(data, &sysctlCheck)
-}
-
-func validateArgs(args *skel.CmdArgs) error {
-	if strings.Contains(args.IfName, string(os.PathSeparator)) {
-		return fmt.Errorf("Interface name (%s) contains an invalid character %s", args.IfName, string(os.PathSeparator))
-	}
-	return nil
-}
-
-func getSysctlFilename(key, ifName string) (string, error) {
-	key = strings.ReplaceAll(key, ".", string(os.PathSeparator))
-
-	// If the key contains `IFNAME` - substitute it with args.IfName
-	// to allow setting sysctls on a particular interface, on which
-	// other operations (like mac/mtu setting) are performed
-	key = strings.Replace(key, "IFNAME", ifName, 1)
-
-	fileName := filepath.Join("/proc/sys", key)
-
-	// Refuse to modify sysctl parameters that don't belong
-	// to the network subsystem.
-	if !strings.HasPrefix(fileName, "/proc/sys/net/") {
-		return "", fmt.Errorf("invalid net sysctl key: %q", key)
-	}
-
-	return fileName, nil
 }

@@ -28,6 +28,7 @@ import (
 	"github.com/containernetworking/cni/pkg/types"
 	current "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/cni/pkg/version"
+
 	"github.com/containernetworking/plugins/pkg/ns"
 	bv "github.com/containernetworking/plugins/pkg/utils/buildversion"
 )
@@ -47,7 +48,6 @@ type PluginConf struct {
 	PrevResult    *current.Result         `json:"-"`
 
 	// Add plugin-specific flags here
-	Table *int `json:"table,omitempty"`
 }
 
 // Wrapper that does a lock before and unlock after operations to serialise
@@ -67,6 +67,7 @@ func withLockAndNetNS(nspath string, toRun func(_ ns.NetNS) error) error {
 	}
 
 	err = ns.WithNetNSPath(nspath, toRun)
+
 	if err != nil {
 		return err
 	}
@@ -108,6 +109,7 @@ func parseConfig(stdin []byte) (*PluginConf, error) {
 
 // getIPCfgs finds the IPs on the supplied interface, returning as IPConfig structures
 func getIPCfgs(iface string, prevResult *current.Result) ([]*current.IPConfig, error) {
+
 	if len(prevResult.IPs) == 0 {
 		// No IP addresses; that makes no sense. Pack it in.
 		return nil, fmt.Errorf("No IP addresses supplied on interface: %s", iface)
@@ -164,10 +166,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 
 	// Do the actual work.
 	err = withLockAndNetNS(args.Netns, func(_ ns.NetNS) error {
-		if conf.Table != nil {
-			return doRoutesWithTable(ipCfgs, *conf.Table)
-		}
-		return doRoutes(ipCfgs, args.IfName)
+		return doRoutes(ipCfgs, conf.PrevResult.Routes, args.IfName)
 	})
 	if err != nil {
 		return err
@@ -206,7 +205,7 @@ func getNextTableID(rules []netlink.Rule, routes []netlink.Route, candidateID in
 }
 
 // doRoutes does all the work to set up routes and rules during an add.
-func doRoutes(ipCfgs []*current.IPConfig, iface string) error {
+func doRoutes(ipCfgs []*current.IPConfig, origRoutes []*types.Route, iface string) error {
 	// Get a list of rules and routes ready.
 	rules, err := netlink.RuleList(netlink.FAMILY_ALL)
 	if err != nil {
@@ -277,8 +276,7 @@ func doRoutes(ipCfgs []*current.IPConfig, iface string) error {
 				Dst:       &dest,
 				Gw:        ipCfg.Gateway,
 				Table:     table,
-				LinkIndex: linkIndex,
-			}
+				LinkIndex: linkIndex}
 
 			err = netlink.RouteAdd(&route)
 			if err != nil {
@@ -334,84 +332,36 @@ func doRoutes(ipCfgs []*current.IPConfig, iface string) error {
 	return nil
 }
 
-func doRoutesWithTable(ipCfgs []*current.IPConfig, table int) error {
-	for _, ipCfg := range ipCfgs {
-		log.Printf("Set rule for source %s", ipCfg.String())
-		rule := netlink.NewRule()
-		rule.Table = table
-
-		// Source must be restricted to a single IP, not a full subnet
-		var src net.IPNet
-		src.IP = ipCfg.Address.IP
-		if src.IP.To4() != nil {
-			src.Mask = net.CIDRMask(32, 32)
-		} else {
-			src.Mask = net.CIDRMask(128, 128)
-		}
-
-		log.Printf("Source to use %s", src.String())
-		rule.Src = &src
-
-		if err := netlink.RuleAdd(rule); err != nil {
-			return fmt.Errorf("failed to add rule: %v", err)
-		}
-	}
-
-	return nil
-}
-
 // cmdDel is called for DELETE requests
 func cmdDel(args *skel.CmdArgs) error {
 	// We care a bit about config because it sets log level.
-	conf, err := parseConfig(args.StdinData)
+	_, err := parseConfig(args.StdinData)
 	if err != nil {
 		return err
 	}
 
 	log.Printf("Cleaning up SBR for %s", args.IfName)
 	err = withLockAndNetNS(args.Netns, func(_ ns.NetNS) error {
-		return tidyRules(args.IfName, conf.Table)
+		return tidyRules(args.IfName)
 	})
 
 	return err
 }
 
 // Tidy up the rules for the deleted interface
-func tidyRules(iface string, table *int) error {
+func tidyRules(iface string) error {
+
 	// We keep on going on rule deletion error, but return the last failure.
 	var errReturn error
-	var err error
-	var rules []netlink.Rule
 
-	if table != nil {
-		rules, err = netlink.RuleListFiltered(
-			netlink.FAMILY_ALL,
-			&netlink.Rule{
-				Table: *table,
-			},
-			netlink.RT_FILTER_TABLE,
-		)
-		if err != nil {
-			log.Printf("Failed to list rules of table %d to tidy: %v", *table, err)
-			return fmt.Errorf("failed to list rules of table %d to tidy: %v", *table, err)
-		}
-	} else {
-		rules, err = netlink.RuleList(netlink.FAMILY_ALL)
-		if err != nil {
-			log.Printf("Failed to list all rules to tidy: %v", err)
-			return fmt.Errorf("Failed to list all rules to tidy: %v", err)
-		}
+	rules, err := netlink.RuleList(netlink.FAMILY_ALL)
+	if err != nil {
+		log.Printf("Failed to list all rules to tidy: %v", err)
+		return fmt.Errorf("Failed to list all rules to tidy: %v", err)
 	}
 
 	link, err := netlink.LinkByName(iface)
 	if err != nil {
-		// If interface is not found by any reason it's safe to ignore an error. Also, we don't need to raise an error
-		// during cmdDel call according to CNI spec:
-		// https://github.com/containernetworking/cni/blob/main/SPEC.md#del-remove-container-from-network-or-un-apply-modifications
-		_, notFound := err.(netlink.LinkNotFoundError)
-		if notFound {
-			return nil
-		}
 		log.Printf("Failed to get link %s: %v", iface, err)
 		return fmt.Errorf("Failed to get link %s: %v", iface, err)
 	}
@@ -447,15 +397,9 @@ RULE_LOOP:
 }
 
 func main() {
-	skel.PluginMainFuncs(skel.CNIFuncs{
-		Add:   cmdAdd,
-		Check: cmdCheck,
-		Del:   cmdDel,
-		/* FIXME GC */
-		/* FIXME Status */
-	}, version.All, bv.BuildString("sbr"))
+	skel.PluginMain(cmdAdd, cmdCheck, cmdDel, version.All, bv.BuildString("sbr"))
 }
 
-func cmdCheck(_ *skel.CmdArgs) error {
+func cmdCheck(args *skel.CmdArgs) error {
 	return nil
 }

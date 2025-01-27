@@ -1,10 +1,7 @@
-//go:build windows
-
 package regstate
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -16,7 +13,7 @@ import (
 	"golang.org/x/sys/windows/registry"
 )
 
-//go:generate go run github.com/Microsoft/go-winio/tools/mkwinsyscall -output zsyscall_windows.go regstate.go
+//go:generate go run $GOROOT/src/syscall/mksyscall_windows.go -output zsyscall_windows.go regstate.go
 
 //sys	regCreateKeyEx(key syscall.Handle, subkey *uint16, reserved uint32, class *uint16, options uint32, desired uint32, sa *syscall.SecurityAttributes, result *syscall.Handle, disposition *uint32) (regerrno error) = advapi32.RegCreateKeyExW
 
@@ -37,16 +34,16 @@ var localUser = &Key{registry.CURRENT_USER, "HKEY_CURRENT_USER"}
 var rootPath = `SOFTWARE\Microsoft\runhcs`
 
 type NotFoundError struct {
-	ID string
+	Id string
 }
 
 func (err *NotFoundError) Error() string {
-	return fmt.Sprintf("ID '%s' was not found", err.ID)
+	return fmt.Sprintf("ID '%s' was not found", err.Id)
 }
 
 func IsNotFoundError(err error) bool {
-	var e *NotFoundError
-	return errors.As(err, &e)
+	_, ok := err.(*NotFoundError)
+	return ok
 }
 
 type NoStateError struct {
@@ -153,8 +150,7 @@ func (k *Key) openid(id string) (*Key, error) {
 	escaped := url.PathEscape(id)
 	fullpath := filepath.Join(k.Name, escaped)
 	nk, err := k.open(escaped)
-	var perr *os.PathError
-	if errors.As(err, &perr) && errors.Is(perr.Err, syscall.ERROR_FILE_NOT_FOUND) {
+	if perr, ok := err.(*os.PathError); ok && perr.Err == syscall.ERROR_FILE_NOT_FOUND {
 		return nil, &NotFoundError{id}
 	}
 	if err != nil {
@@ -167,7 +163,7 @@ func (k *Key) Remove(id string) error {
 	escaped := url.PathEscape(id)
 	err := registry.DeleteKey(k.Key, escaped)
 	if err != nil {
-		if err == syscall.ERROR_FILE_NOT_FOUND { //nolint:errorlint
+		if err == syscall.ERROR_FILE_NOT_FOUND {
 			return &NotFoundError{id}
 		}
 		return &os.PathError{Op: "RegDeleteKey", Path: filepath.Join(k.Name, escaped), Err: err}
@@ -217,7 +213,7 @@ func (k *Key) set(id string, create bool, key string, state interface{}) error {
 		err = sk.SetBinaryValue(key, js)
 	}
 	if err != nil {
-		if err == syscall.ERROR_FILE_NOT_FOUND { //nolint:errorlint
+		if err == syscall.ERROR_FILE_NOT_FOUND {
 			return &NoStateError{id, key}
 		}
 		return &os.PathError{Op: "RegSetValueEx", Path: sk.Name + ":" + key, Err: err}
@@ -241,7 +237,7 @@ func (k *Key) Clear(id, key string) error {
 	defer sk.Close()
 	err = sk.DeleteValue(key)
 	if err != nil {
-		if err == syscall.ERROR_FILE_NOT_FOUND { //nolint:errorlint
+		if err == syscall.ERROR_FILE_NOT_FOUND {
 			return &NoStateError{id, key}
 		}
 		return &os.PathError{Op: "RegDeleteValue", Path: sk.Name + ":" + key, Err: err}
@@ -280,7 +276,7 @@ func (k *Key) Get(id, key string, state interface{}) error {
 		js, _, err = sk.GetBinaryValue(key)
 	}
 	if err != nil {
-		if err == syscall.ERROR_FILE_NOT_FOUND { //nolint:errorlint
+		if err == syscall.ERROR_FILE_NOT_FOUND {
 			return &NoStateError{id, key}
 		}
 		return &os.PathError{Op: "RegQueryValueEx", Path: sk.Name + ":" + key, Err: err}

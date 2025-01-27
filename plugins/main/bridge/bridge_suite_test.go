@@ -15,26 +15,13 @@
 package main
 
 import (
-	"testing"
-
-	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
-)
 
-var (
-	resolvConf string
-	err        error
+	"testing"
 )
 
 func TestBridge(t *testing.T) {
 	RegisterFailHandler(Fail)
-
-	resolvConf, err = newResolvConf()
-	Expect(err).NotTo(HaveOccurred())
-
 	RunSpecs(t, "plugins/main/bridge")
 }
-
-var _ = AfterSuite(func() {
-	deleteResolvConf(resolvConf)
-})

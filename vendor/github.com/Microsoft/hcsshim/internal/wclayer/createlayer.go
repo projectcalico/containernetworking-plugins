@@ -1,5 +1,3 @@
-//go:build windows
-
 package wclayer
 
 import (
@@ -14,7 +12,7 @@ import (
 // the parent layer provided.
 func CreateLayer(ctx context.Context, path, parent string) (err error) {
 	title := "hcsshim::CreateLayer"
-	ctx, span := oc.StartSpan(ctx, title) //nolint:ineffassign,staticcheck
+	ctx, span := trace.StartSpan(ctx, title) //nolint:ineffassign,staticcheck
 	defer span.End()
 	defer func() { oc.SetSpanStatus(span, err) }()
 	span.AddAttributes(
@@ -23,7 +21,7 @@ func CreateLayer(ctx context.Context, path, parent string) (err error) {
 
 	err = createLayer(&stdDriverInfo, path, parent)
 	if err != nil {
-		return hcserror.New(err, title, "")
+		return hcserror.New(err, title+" - failed", "")
 	}
 	return nil
 }

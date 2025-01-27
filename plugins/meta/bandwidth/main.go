@@ -25,25 +25,24 @@ import (
 	"github.com/containernetworking/cni/pkg/types"
 	current "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/cni/pkg/version"
+
 	"github.com/containernetworking/plugins/pkg/ip"
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/containernetworking/plugins/pkg/utils"
 	bv "github.com/containernetworking/plugins/pkg/utils/buildversion"
 )
 
-const (
-	maxIfbDeviceLength = 15
-	ifbDevicePrefix    = "bwp"
-)
+const maxIfbDeviceLength = 15
+const ifbDevicePrefix = "bwp"
 
 // BandwidthEntry corresponds to a single entry in the bandwidth argument,
 // see CONVENTIONS.md
 type BandwidthEntry struct {
-	IngressRate  uint64 `json:"ingressRate"`  // Bandwidth rate in bps for traffic through container. 0 for no limit. If ingressRate is set, ingressBurst must also be set
-	IngressBurst uint64 `json:"ingressBurst"` // Bandwidth burst in bits for traffic through container. 0 for no limit. If ingressBurst is set, ingressRate must also be set
+	IngressRate  uint64 `json:"ingressRate"`  //Bandwidth rate in bps for traffic through container. 0 for no limit. If ingressRate is set, ingressBurst must also be set
+	IngressBurst uint64 `json:"ingressBurst"` //Bandwidth burst in bits for traffic through container. 0 for no limit. If ingressBurst is set, ingressRate must also be set
 
-	EgressRate  uint64 `json:"egressRate"`  // Bandwidth rate in bps for traffic through container. 0 for no limit. If egressRate is set, egressBurst must also be set
-	EgressBurst uint64 `json:"egressBurst"` // Bandwidth burst in bits for traffic through container. 0 for no limit. If egressBurst is set, egressRate must also be set
+	EgressRate  uint64 `json:"egressRate"`  //Bandwidth rate in bps for traffic through container. 0 for no limit. If egressRate is set, egressBurst must also be set
+	EgressBurst uint64 `json:"egressBurst"` //Bandwidth burst in bits for traffic through container. 0 for no limit. If egressBurst is set, egressRate must also be set
 }
 
 func (bw *BandwidthEntry) isZero() bool {
@@ -93,6 +92,7 @@ func parseConfig(stdin []byte) (*PluginConf, error) {
 	}
 
 	return &conf, nil
+
 }
 
 func getBandwidth(conf *PluginConf) *BandwidthEntry {
@@ -104,6 +104,8 @@ func getBandwidth(conf *PluginConf) *BandwidthEntry {
 
 func validateRateAndBurst(rate, burst uint64) error {
 	switch {
+	case burst < 0 || rate < 0:
+		return fmt.Errorf("rate and burst must be a positive integer")
 	case burst == 0 && rate != 0:
 		return fmt.Errorf("if rate is set, burst must also be set")
 	case rate == 0 && burst != 0:
@@ -115,8 +117,8 @@ func validateRateAndBurst(rate, burst uint64) error {
 	return nil
 }
 
-func getIfbDeviceName(networkName string, containerID string) string {
-	return utils.MustFormatHashWithPrefix(maxIfbDeviceLength, ifbDevicePrefix, networkName+containerID)
+func getIfbDeviceName(networkName string, containerId string) string {
+	return utils.MustFormatHashWithPrefix(maxIfbDeviceLength, ifbDevicePrefix, networkName+containerId)
 }
 
 func getMTU(deviceName string) (int, error) {
@@ -236,17 +238,15 @@ func cmdDel(args *skel.CmdArgs) error {
 
 	ifbDeviceName := getIfbDeviceName(conf.Name, args.ContainerID)
 
-	return TeardownIfb(ifbDeviceName)
+	if err := TeardownIfb(ifbDeviceName); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func main() {
-	skel.PluginMainFuncs(skel.CNIFuncs{
-		Add:   cmdAdd,
-		Check: cmdCheck,
-		Del:   cmdDel,
-		/* FIXME GC */
-		/* FIXME Status */
-	}, version.VersionsStartingFrom("0.3.0"), bv.BuildString("bandwidth"))
+	skel.PluginMain(cmdAdd, cmdCheck, cmdDel, version.VersionsStartingFrom("0.3.0"), bv.BuildString("bandwidth"))
 }
 
 func SafeQdiscList(link netlink.Link) ([]netlink.Qdisc, error) {
@@ -301,9 +301,9 @@ func cmdCheck(args *skel.CmdArgs) error {
 	if bandwidth.IngressRate > 0 && bandwidth.IngressBurst > 0 {
 		rateInBytes := bandwidth.IngressRate / 8
 		burstInBytes := bandwidth.IngressBurst / 8
-		bufferInBytes := buffer(rateInBytes, uint32(burstInBytes))
+		bufferInBytes := buffer(uint64(rateInBytes), uint32(burstInBytes))
 		latency := latencyInUsec(latencyInMillis)
-		limitInBytes := limit(rateInBytes, latency, uint32(burstInBytes))
+		limitInBytes := limit(uint64(rateInBytes), latency, uint32(burstInBytes))
 
 		qdiscs, err := SafeQdiscList(link)
 		if err != nil {
@@ -318,13 +318,13 @@ func cmdCheck(args *skel.CmdArgs) error {
 			if !isTbf {
 				break
 			}
-			if tbf.Rate != rateInBytes {
+			if tbf.Rate != uint64(rateInBytes) {
 				return fmt.Errorf("Rate doesn't match")
 			}
-			if tbf.Limit != limitInBytes {
+			if tbf.Limit != uint32(limitInBytes) {
 				return fmt.Errorf("Limit doesn't match")
 			}
-			if tbf.Buffer != bufferInBytes {
+			if tbf.Buffer != uint32(bufferInBytes) {
 				return fmt.Errorf("Buffer doesn't match")
 			}
 		}
@@ -333,9 +333,9 @@ func cmdCheck(args *skel.CmdArgs) error {
 	if bandwidth.EgressRate > 0 && bandwidth.EgressBurst > 0 {
 		rateInBytes := bandwidth.EgressRate / 8
 		burstInBytes := bandwidth.EgressBurst / 8
-		bufferInBytes := buffer(rateInBytes, uint32(burstInBytes))
+		bufferInBytes := buffer(uint64(rateInBytes), uint32(burstInBytes))
 		latency := latencyInUsec(latencyInMillis)
-		limitInBytes := limit(rateInBytes, latency, uint32(burstInBytes))
+		limitInBytes := limit(uint64(rateInBytes), latency, uint32(burstInBytes))
 
 		ifbDeviceName := getIfbDeviceName(bwConf.Name, args.ContainerID)
 
@@ -357,13 +357,13 @@ func cmdCheck(args *skel.CmdArgs) error {
 			if !isTbf {
 				break
 			}
-			if tbf.Rate != rateInBytes {
+			if tbf.Rate != uint64(rateInBytes) {
 				return fmt.Errorf("Rate doesn't match")
 			}
-			if tbf.Limit != limitInBytes {
+			if tbf.Limit != uint32(limitInBytes) {
 				return fmt.Errorf("Limit doesn't match")
 			}
-			if tbf.Buffer != bufferInBytes {
+			if tbf.Buffer != uint32(bufferInBytes) {
 				return fmt.Errorf("Buffer doesn't match")
 			}
 		}

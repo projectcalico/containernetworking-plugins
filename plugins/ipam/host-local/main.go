@@ -15,31 +15,26 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"net"
 	"strings"
+
+	bv "github.com/containernetworking/plugins/pkg/utils/buildversion"
+	"github.com/containernetworking/plugins/plugins/ipam/host-local/backend/allocator"
+	"github.com/containernetworking/plugins/plugins/ipam/host-local/backend/disk"
 
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
 	current "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/cni/pkg/version"
-	bv "github.com/containernetworking/plugins/pkg/utils/buildversion"
-	"github.com/containernetworking/plugins/plugins/ipam/host-local/backend/allocator"
-	"github.com/containernetworking/plugins/plugins/ipam/host-local/backend/disk"
 )
 
 func main() {
-	skel.PluginMainFuncs(skel.CNIFuncs{
-		Add:   cmdAdd,
-		Check: cmdCheck,
-		Del:   cmdDel,
-		/* FIXME GC */
-		/* FIXME Status */
-	}, version.All, bv.BuildString("host-local"))
+	skel.PluginMain(cmdAdd, cmdCheck, cmdDel, version.All, bv.BuildString("host-local"))
 }
 
 func cmdCheck(args *skel.CmdArgs) error {
+
 	ipamConf, _, err := allocator.LoadIPAMConfig(args.StdinData, args.Args)
 	if err != nil {
 		return err
@@ -53,8 +48,8 @@ func cmdCheck(args *skel.CmdArgs) error {
 	}
 	defer store.Close()
 
-	containerIPFound := store.FindByID(args.ContainerID, args.IfName)
-	if !containerIPFound {
+	containerIpFound := store.FindByID(args.ContainerID, args.IfName)
+	if containerIpFound == false {
 		return fmt.Errorf("host-local: Failed to find address added by container %v", args.ContainerID)
 	}
 
@@ -89,7 +84,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 
 	// Store all requested IPs in a map, so we can easily remove ones we use
 	// and error if some remain
-	requestedIPs := map[string]net.IP{} // net.IP cannot be a key
+	requestedIPs := map[string]net.IP{} //net.IP cannot be a key
 
 	for _, ip := range ipamConf.IPArgs {
 		requestedIPs[ip.String()] = ip
@@ -131,7 +126,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 		for _, ip := range requestedIPs {
 			errstr = errstr + " " + ip.String()
 		}
-		return errors.New(errstr)
+		return fmt.Errorf(errstr)
 	}
 
 	result.Routes = ipamConf.Routes
@@ -152,18 +147,18 @@ func cmdDel(args *skel.CmdArgs) error {
 	defer store.Close()
 
 	// Loop through all ranges, releasing all IPs, even if an error occurs
-	var errs []string
+	var errors []string
 	for idx, rangeset := range ipamConf.Ranges {
 		ipAllocator := allocator.NewIPAllocator(&rangeset, store, idx)
 
 		err := ipAllocator.Release(args.ContainerID, args.IfName)
 		if err != nil {
-			errs = append(errs, err.Error())
+			errors = append(errors, err.Error())
 		}
 	}
 
-	if errs != nil {
-		return errors.New(strings.Join(errs, ";"))
+	if errors != nil {
+		return fmt.Errorf(strings.Join(errors, ";"))
 	}
 	return nil
 }

@@ -16,14 +16,13 @@ Read [CONTRIBUTING](CONTRIBUTING.md) for build and test instructions.
 * `ptp`: Creates a veth pair.
 * `vlan`: Allocates a vlan device.
 * `host-device`: Move an already-existing device into a container.
-* `dummy`: Creates a new Dummy device in the container.
 #### Windows: Windows specific
 * `win-bridge`: Creates a bridge, adds the host and the container to it.
 * `win-overlay`: Creates an overlay interface to the container.
 ### IPAM: IP address allocation
 * `dhcp`: Runs a daemon on the host to make DHCP requests on behalf of the container
 * `host-local`: Maintains a local database of allocated IPs
-* `static`:  Allocate a single static IPv4/IPv6 address to container. It's useful in debugging purpose.
+* `static`:  Allocate a static IPv4/IPv6 addresses to container and it's useful in debugging purpose.
 
 ### Meta: other plugins
 * `tuning`: Tweaks sysctl parameters of an existing interface

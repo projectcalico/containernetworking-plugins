@@ -21,6 +21,7 @@ import (
 
 	"github.com/containernetworking/cni/pkg/types"
 	"github.com/containernetworking/cni/pkg/version"
+
 	"github.com/containernetworking/plugins/pkg/ip"
 )
 
@@ -42,7 +43,7 @@ type Net struct {
 
 // IPAMConfig represents the IP related network configuration.
 // This nests Range because we initially only supported a single
-// range directly, and wish to preserve backwards compatibility
+// range directly, and wish to preserve backwards compatability
 type IPAMConfig struct {
 	*Range
 	Name       string
