@@ -15,11 +15,11 @@ require (
 	github.com/godbus/dbus/v5 v5.0.4
 	github.com/j-keck/arping v1.0.2
 	github.com/mattn/go-shellwords v1.0.12
-	github.com/networkplumbing/go-nft v0.2.0
-	github.com/onsi/ginkgo v1.16.4
-	github.com/onsi/gomega v1.15.0
-	github.com/safchain/ethtool v0.0.0-20210803160452-9aa261dae9b1
-	github.com/vishvananda/netlink v1.1.1-0.20210330154013-f5de75959ad5
+	github.com/networkplumbing/go-nft v0.4.0
+	github.com/onsi/ginkgo v1.13.0
+	github.com/onsi/gomega v1.33.1
+	github.com/safchain/ethtool v0.4.1
+	github.com/vishvananda/netlink v1.3.0
 	golang.org/x/sys v0.21.0
 )
 
@@ -29,13 +29,15 @@ require (
 	github.com/fsnotify/fsnotify v1.4.9 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/groupcache v0.0.0-20200121045136-8c9f03a8e57e // indirect
+	github.com/google/go-cmp v0.6.0 // indirect
 	github.com/nxadm/tail v1.4.8 // indirect
+	github.com/onsi/ginkgo/v2 v2.19.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/sirupsen/logrus v1.8.1 // indirect
-	github.com/vishvananda/netns v0.0.0-20210104183010-2eb08e3e575f // indirect
+	github.com/vishvananda/netns v0.0.4 // indirect
 	go.opencensus.io v0.22.3 // indirect
-	golang.org/x/net v0.23.0 // indirect
-	golang.org/x/text v0.14.0 // indirect
+	golang.org/x/net v0.25.0 // indirect
+	golang.org/x/text v0.15.0 // indirect
 	gopkg.in/tomb.v1 v1.0.0-20141024135613-dd632973f1e7 // indirect
-	gopkg.in/yaml.v2 v2.4.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

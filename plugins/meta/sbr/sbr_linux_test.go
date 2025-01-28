@@ -54,7 +54,9 @@ func setup(targetNs ns.NetNS, status netStatus) error {
 	err := targetNs.Do(func(_ ns.NetNS) error {
 		for _, dev := range status.Devices {
 			log.Printf("Adding dev %s\n", dev.Name)
-			link := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: dev.Name}}
+			linkAttrs := netlink.NewLinkAttrs()
+			linkAttrs.Name = dev.Name
+			link := &netlink.Dummy{LinkAttrs: linkAttrs}
 			err := netlink.LinkAdd(link)
 			if err != nil {
 				return err
@@ -292,6 +294,7 @@ var _ = Describe("sbr test", func() {
 		expNet1.Routes = append(expNet1.Routes,
 			netlink.Route{
 				Gw:        net.IPv4(192, 168, 1, 1),
+				Dst:       &net.IPNet{IP: net.IPv4zero, Mask: net.IPMask(net.IPv4zero)},
 				Table:     100,
 				LinkIndex: expNet1.Routes[0].LinkIndex})
 
@@ -489,12 +492,14 @@ var _ = Describe("sbr test", func() {
 		}
 		expNet1.Routes = append(expNet1.Routes,
 			netlink.Route{
+				Dst:       &net.IPNet{IP: net.IPv4zero, Mask: net.IPMask(net.IPv4zero)},
 				Gw:        net.IPv4(192, 168, 1, 1),
 				Table:     100,
 				LinkIndex: expNet1.Routes[0].LinkIndex})
 
 		expNet1.Routes = append(expNet1.Routes,
 			netlink.Route{
+				Dst:       &net.IPNet{IP: net.IPv4zero, Mask: net.IPMask(net.IPv4zero)},
 				Gw:        net.IPv4(192, 168, 101, 1),
 				Table:     101,
 				LinkIndex: expNet1.Routes[0].LinkIndex})
