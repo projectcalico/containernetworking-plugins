@@ -126,7 +126,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 		for _, ip := range requestedIPs {
 			errstr = errstr + " " + ip.String()
 		}
-		return fmt.Errorf(errstr)
+		return fmt.Errorf("%s", errstr)
 	}
 
 	result.Routes = ipamConf.Routes
@@ -158,7 +158,7 @@ func cmdDel(args *skel.CmdArgs) error {
 	}
 
 	if errors != nil {
-		return fmt.Errorf(strings.Join(errors, ";"))
+		return fmt.Errorf("%s", strings.Join(errors, ";"))
 	}
 	return nil
 }
